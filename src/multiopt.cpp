@@ -289,7 +289,15 @@ bool recvOptions(NETQUEUE queue)
 						if (asStructureStats[ingame.structureLimits[i].id].upgrade[0].limit != ingame.structureLimits[i].limit)
 						{
 							WzString structname = asStructureStats[ingame.structureLimits[i].id].name;
-							std::string tmpConsoleMsgStr = astringf(_("[%d] Limit [%s]: %u (default: %u)"), changedNum, structname.toUtf8().c_str(), ingame.structureLimits[i].limit, asStructureStats[ingame.structureLimits[i].id].upgrade[0].limit);
+							std::string tmpConsoleMsgStr;
+							if (asStructureStats[ingame.structureLimits[i].id].upgrade[0].limit != LOTS_OF)
+							{
+								tmpConsoleMsgStr = astringf(_("[%d] Limit [%s]: %u (default: %u)"), changedNum, structname.toUtf8().c_str(), ingame.structureLimits[i].limit, asStructureStats[ingame.structureLimits[i].id].upgrade[0].limit);
+							}
+							else
+							{
+								tmpConsoleMsgStr = astringf(_("[%d] Limit [%s]: %u (default: no limit)"), changedNum, structname.toUtf8().c_str(), ingame.structureLimits[i].limit);
+							}
 							addConsoleMessage(tmpConsoleMsgStr.c_str(), DEFAULT_JUSTIFY, SYSTEM_MESSAGE);
 							changedNum++;
 						}
@@ -432,6 +440,12 @@ bool recvOptions(NETQUEUE queue)
 		}
 	}
 
+	if (!NetPlay.isHost && !NET_getDownloadingWzFiles().empty())
+	{
+		// spectators should automatically become not-ready when files remain to be downloaded
+		handleAutoReadyRequest();
+	}
+
 	if (mapData && CheckForMod(mapData->realFileName))
 	{
 		char const *str = game.isMapMod ?
@@ -471,7 +485,10 @@ bool hostCampaign(const char *SessionName, char *hostPlayerName, bool spectatorH
 	{
 		for (unsigned i = 0; i < MAX_CONNECTED_PLAYERS; i++)
 		{
-			NetPlay.players[i].difficulty = AIDifficulty::DISABLED;
+			if (!(i == selectedPlayer && i < MAX_PLAYERS))
+			{
+				NetPlay.players[i].difficulty = AIDifficulty::DISABLED;
+			}
 		}
 	}
 
@@ -533,10 +550,35 @@ static bool gameInit()
 {
 	UDWORD			player;
 
+	// Various sanity checks (for *true* multiplayer)
+	for (player = 0; player < MAX_CONNECTED_PLAYERS; player++)
+	{
+		if (player < MAX_PLAYERS)
+		{
+			if (NetPlay.players[player].allocated)
+			{
+				ASSERT(NetPlay.players[player].difficulty == AIDifficulty::HUMAN, "Found an allocated (human) player (%u) with mis-matched difficulty (%d)", player, (int)NetPlay.players[player].difficulty);
+
+			}
+		}
+
+		if (bMultiPlayer && NetPlay.bComms)
+		{
+			if (!NetPlay.players[player].allocated)
+			{
+				ASSERT(NetPlay.players[player].difficulty != AIDifficulty::HUMAN, "Found a non-human slot (%u) with mis-matched (human) difficulty (%d)", player, (int)NetPlay.players[player].difficulty);
+				ASSERT(NetPlay.players[player].ai < 0 || NetPlay.players[player].difficulty != AIDifficulty::DISABLED, "Slot (%u) has AI, but disabled difficulty?", player);
+			}
+		}
+	}
+
 	for (player = 1; player < MAX_CONNECTED_PLAYERS; player++)
 	{
 		// we want to remove disabled AI & all the other players that don't belong
-		if ((NetPlay.players[player].difficulty == AIDifficulty::DISABLED || player >= game.maxPlayers) && player != scavengerPlayer() && !(NetPlay.players[player].isSpectator && NetPlay.players[player].allocated))
+		if ((NetPlay.players[player].difficulty == AIDifficulty::DISABLED || player >= game.maxPlayers)
+			&& player != scavengerPlayer()
+			&& !(NetPlay.players[player].isSpectator && NetPlay.players[player].allocated)
+			&& !(player < game.maxPlayers && NetPlay.players[player].allocated))
 		{
 			clearPlayer(player, true);			// do this quietly
 			debug(LOG_NET, "removing disabled AI (%d) from map.", player);

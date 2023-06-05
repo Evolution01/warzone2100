@@ -18,6 +18,7 @@ find_program( GLSLC "glslc"
 file(GLOB VK_SHADERS
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/generic.vert"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/rect.vert"
+	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/rect_instanced.vert"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/gfx_text.vert"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/gfx_color.vert"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/line.vert"
@@ -26,10 +27,12 @@ file(GLOB VK_SHADERS
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/terrain_water.vert"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/decals.vert"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/nolight.vert"
-	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/button.vert"
+	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/nolight_instanced.vert"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/tcmask.vert"
+	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/tcmask_instanced.vert"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/skybox.vert"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/rect.frag"
+	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/rect_instanced.frag"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/texturedrect.frag"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/gfx.frag"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/text.frag"
@@ -38,8 +41,9 @@ file(GLOB VK_SHADERS
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/water.frag"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/decals.frag"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/nolight.frag"
-	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/button.frag"
+	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/nolight_instanced.frag"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/tcmask.frag"
+	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/tcmask_instanced.frag"
 	"${CMAKE_CURRENT_SOURCE_DIR}/base/shaders/vk/skybox.frag"
 )
 
@@ -86,7 +90,7 @@ set(_texpages_PATHS
 	WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/base"
 )
 
-if(WZ_ENABLE_BASIS_UNIVERSAL)
+if(WZ_ENABLE_BASIS_UNIVERSAL AND NOT WZ_CI_DISABLE_BASIS_COMPRESS_TEXTURES)
 	if(NOT DEFINED BASIS_UNIVERSAL_CLI)
 		message(FATAL_ERROR "No basisu tool has been provided - set BASIS_UNIVERSAL_CLI to the path to basisu or disable WZ_ENABLE_BASIS_UNIVERSAL!")
 	endif()
@@ -131,7 +135,7 @@ if(WZ_ENABLE_BASIS_UNIVERSAL)
 		set(_output_name "${TEXTURE_FILE_NAME_WE}.ktx2")
 		add_custom_command(OUTPUT "${_output_dir}/${_output_name}"
 			COMMAND "${BASIS_UNIVERSAL_CLI}"
-			ARGS -ktx2 -uastc -uastc_level 2 -uastc_rdo_l 1.0 -mipmap -resample ${_terrain_max_size} ${_terrain_max_size} -output_file "${_output_dir}/${_output_name}" -file "${TEXTURE}"
+			ARGS -ktx2 -uastc -uastc_level 2 -uastc_rdo_l 1.0 -uastc_rdo_m -mipmap -resample ${_terrain_max_size} ${_terrain_max_size} -output_file "${_output_dir}/${_output_name}" -file "${TEXTURE}"
 			WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/base/texpages"
 			DEPENDS "${TEXTURE}"
 			VERBATIM
@@ -169,6 +173,10 @@ if(WZ_ENABLE_BASIS_UNIVERSAL)
 		WORKING_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/base"
 	)
 
+else()
+	if(WZ_ENABLE_BASIS_UNIVERSAL AND WZ_CI_DISABLE_BASIS_COMPRESS_TEXTURES)
+		message(STATUS "WZ_CI_DISABLE_BASIS_COMPRESS_TEXTURES is set, textures will not be compressed as part of build. This should only be used for selected CI runs.")
+	endif()
 endif()
 
 #########################

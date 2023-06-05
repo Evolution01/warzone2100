@@ -72,6 +72,7 @@ struct screeninfo
 void wzMain(int &argc, char **argv);
 bool wzMainScreenSetup(optional<video_backend> backend, int antialiasing = 0, WINDOW_MODE fullscreen = WINDOW_MODE::windowed, int vsync = 1, int lodDistanceBiasPercentage = 0, bool highDPI = true);
 video_backend wzGetDefaultGfxBackendForCurrentSystem();
+bool wzPromptToChangeGfxBackendOnFailure(std::string additionalErrorDetails = "");
 void wzGetGameToRendererScaleFactor(float *horizScaleFactor, float *vertScaleFactor);
 void wzGetGameToRendererScaleFactorInt(unsigned int *horizScalePercentage, unsigned int *vertScalePercentage);
 void wzMainEventLoop(std::function<void()> onShutdown);
@@ -91,6 +92,7 @@ bool wzIsFullscreen();
 void wzSetWindowIsResizable(bool resizable);
 bool wzIsWindowResizable();
 bool wzChangeDisplayScale(unsigned int displayScale);
+bool wzChangeCursorScale(unsigned int cursorScale);
 bool wzChangeFullscreenDisplayMode(int screen, unsigned int width, unsigned int height);
 bool wzChangeWindowResolution(int screen, unsigned int width, unsigned int height);
 enum class MinimizeOnFocusLossBehavior
@@ -135,6 +137,9 @@ bool isInTextInputMode();
 
 // NOTE: wzBackendAttemptOpenURL should *not* be called directly - instead, call openURLInBrowser() from urlhelpers.h
 bool wzBackendAttemptOpenURL(const char *url);
+
+// System information related
+uint64_t wzGetCurrentSystemRAM(); // gets the system RAM in MiB
 
 // Thread related
 WZ_THREAD *wzThreadCreate(int (*threadFunc)(void *), void *data);

@@ -37,6 +37,8 @@
 #include <numeric>
 #include <array>
 #include <physfs.h>
+#include "lib/framework/physfs_ext.h"
+#include <LaunchInfo.h>
 
 #define ASCII_SPACE			(32)
 #define ASCII_NEWLINE			('@')
@@ -509,7 +511,7 @@ private:
 	lru11::Cache<FTGlyphCacheKey, WZOwnedFTGlyph> m_glyphCache;
 };
 
-static FTCache glyphCache;
+static FTCache* glyphCache = nullptr;
 
 struct TextRun
 {
@@ -664,7 +666,7 @@ struct TextShaper
 
 		std::tie(min_x, max_x, min_y, max_y) = std::accumulate(shapingResult.glyphes.begin(), shapingResult.glyphes.end(), std::make_tuple(1000, -1000, 1000, -1000),
 			[] (const std::tuple<int32_t, int32_t, int32_t, int32_t> &bounds, const HarfbuzzPosition &g) {
-			GlyphMetrics glyph = glyphCache.getGlyphMetrics(g.face, g.codepoint, g.penPosition % 64);
+			GlyphMetrics glyph = glyphCache->getGlyphMetrics(g.face, g.codepoint, g.penPosition % 64);
 			int32_t x0 = g.penPosition.x / 64 + glyph.bearing_x;
 			int32_t y0 = g.penPosition.y / 64 - glyph.bearing_y;
 			return std::make_tuple(
@@ -730,7 +732,7 @@ struct TextShaper
 		std::vector<glyphRaster> glyphs;
 		std::transform(shapingResult.glyphes.begin(), shapingResult.glyphes.end(), std::back_inserter(glyphs),
 			[&] (const HarfbuzzPosition &g) {
-			RasterizedGlyph glyph = glyphCache.get(g.face, g.codepoint, g.penPosition % 64);
+			RasterizedGlyph glyph = glyphCache->get(g.face, g.codepoint, g.penPosition % 64);
 			int32_t x0 = g.penPosition.x / 64 + glyph.bearing_x;
 			int32_t y0 = g.penPosition.y / 64 - glyph.bearing_y;
 			min_x = std::min(x0, min_x);
@@ -1041,8 +1043,8 @@ public:
 	std::unique_ptr<FTFace> small;
 	std::unique_ptr<FTFace> smallBold;
 };
-static WZFontCollection baseFonts;
-static std::unique_ptr<WZFontCollection> cjkFonts;
+static WZFontCollection* baseFonts = nullptr;
+static WZFontCollection* cjkFonts = nullptr;
 static bool failedToLoadCJKFonts = false;
 
 struct iVFontsHash
@@ -1061,7 +1063,7 @@ static bool inline initializeCJKFontsIfNeeded()
 {
 	if (cjkFonts) { return true; }
 	if (failedToLoadCJKFonts) { return false; }
-	cjkFonts = std::unique_ptr<WZFontCollection>(new WZFontCollection());
+	cjkFonts = new WZFontCollection();
 	uint32_t horizDPI = static_cast<uint32_t>(DEFAULT_DPI * _horizScaleFactor);
 	uint32_t vertDPI = static_cast<uint32_t>(DEFAULT_DPI * _vertScaleFactor);
 	try {
@@ -1075,7 +1077,8 @@ static bool inline initializeCJKFontsIfNeeded()
 	}
 	catch (const std::exception &e) {
 		debug(LOG_ERROR, "Failed to load font:\n%s", e.what());
-		cjkFonts.reset();
+		delete cjkFonts;
+		cjkFonts = nullptr;
 		failedToLoadCJKFonts = true;
 		return false;
 	}
@@ -1121,19 +1124,19 @@ static FTFace &getFTFace(iV_fonts FontID, hb_script_t script)
 	{
 	default:
 	case font_regular:
-		return *(baseFonts.regular);
+		return *(baseFonts->regular);
 	case font_regular_bold:
-		return *(baseFonts.regularBold);
+		return *(baseFonts->regularBold);
 	case font_large:
-		return *(baseFonts.bold);
+		return *(baseFonts->bold);
 	case font_medium:
-		return *(baseFonts.medium);
+		return *(baseFonts->medium);
 	case font_medium_bold:
-		return *(baseFonts.mediumBold);
+		return *(baseFonts->mediumBold);
 	case font_small:
-		return *(baseFonts.small);
+		return *(baseFonts->small);
 	case font_bar:
-		return *(baseFonts.smallBold);
+		return *(baseFonts->smallBold);
 	}
 }
 
@@ -1161,17 +1164,39 @@ void iV_TextInit(unsigned int horizScalePercentage, unsigned int vertScalePercen
 	uint32_t vertDPI = static_cast<uint32_t>(DEFAULT_DPI * vertScaleFactor);
 	debug(LOG_WZ, "Text-Rendering Scaling Factor: %f x %f; Internal Font DPI: %" PRIu32 " x %" PRIu32 "", _horizScaleFactor, _vertScaleFactor, horizDPI, vertDPI);
 
+	if (glyphCache == nullptr)
+	{
+		glyphCache = new FTCache();
+	}
+
+	if (baseFonts == nullptr)
+	{
+		baseFonts = new WZFontCollection();
+	}
+
 	try {
-		baseFonts.regular = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans.ttf", 12 * 64, horizDPI, vertDPI));
-		baseFonts.regularBold = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans-Bold.ttf", 12 * 64, horizDPI, vertDPI));
-		baseFonts.bold = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans-Bold.ttf", 21 * 64, horizDPI, vertDPI));
-		baseFonts.medium = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans.ttf", 16 * 64, horizDPI, vertDPI));
-		baseFonts.mediumBold = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans-Bold.ttf", 16 * 64, horizDPI, vertDPI));
-		baseFonts.small = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans.ttf", 9 * 64, horizDPI, vertDPI));
-		baseFonts.smallBold = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans-Bold.ttf", 9 * 64, horizDPI, vertDPI));
+		baseFonts->regular = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans.ttf", 12 * 64, horizDPI, vertDPI));
+		baseFonts->regularBold = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans-Bold.ttf", 12 * 64, horizDPI, vertDPI));
+		baseFonts->bold = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans-Bold.ttf", 21 * 64, horizDPI, vertDPI));
+		baseFonts->medium = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans.ttf", 16 * 64, horizDPI, vertDPI));
+		baseFonts->mediumBold = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans-Bold.ttf", 16 * 64, horizDPI, vertDPI));
+		baseFonts->small = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans.ttf", 9 * 64, horizDPI, vertDPI));
+		baseFonts->smallBold = std::unique_ptr<FTFace>(new FTFace(getGlobalFTlib().lib, "fonts/DejaVuSans-Bold.ttf", 9 * 64, horizDPI, vertDPI));
 	}
 	catch (const std::exception &e) {
-		debug(LOG_FATAL, "Failed to load base font:\n%s", e.what());
+		// Log lots of details:
+		debugOutputSearchPaths();
+		debug(LOG_INFO, "Virtual filesystem:");
+		WZ_PHYSFS_enumerateFiles("", [&](const char *file) -> bool {
+			if (!file) { return true; }
+			debug(LOG_INFO, " - %s", file);
+			return true; // continue enumeration
+		});
+		debug(LOG_INFO, "Path to executable: %s", LaunchInfo::getCurrentProcessDetails().imageFileName.fullPath().c_str());
+		debugOutputSearchPathMountErrors();
+		// then...
+		debug(LOG_FATAL, "Failed to load base font:\n%s\n", e.what());
+		abort();
 	}
 
 	// Do a sanity-check here to make sure the CJK font exists
@@ -1191,9 +1216,13 @@ void iV_TextInit(unsigned int horizScalePercentage, unsigned int vertScalePercen
 
 void iV_TextShutdown()
 {
-	glyphCache.clear();
-	baseFonts = WZFontCollection();
-	cjkFonts.reset();
+	glyphCache->clear();
+	delete glyphCache;
+	glyphCache = nullptr;
+	delete baseFonts;
+	baseFonts = nullptr;
+	delete cjkFonts;
+	cjkFonts = nullptr;
 	delete textureID;
 	textureID = nullptr;
 	fontToEllipsisMap.clear();

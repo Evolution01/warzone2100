@@ -464,3 +464,22 @@ bool useCrashHandlingProvider(int argc, const char * const *argv, bool& out_debu
 #endif
 }
 
+bool crashHandlingProviderTestCrash()
+{
+#if !defined(WZ_CRASHHANDLING_PROVIDER)
+	return false; // caller should handle its own way
+#elif defined(WZ_CRASHHANDLING_PROVIDER_SENTRY)
+	// Sentry crash-handling provider
+	if (!enabledSentryProvider) { return false; }
+# if defined(WZ_OS_WIN)
+	RaiseException(0xE000DEAD, EXCEPTION_NONCONTINUABLE, 0, 0);
+	return false;
+# else
+	// future todo: implement for other platforms
+	return false;
+# endif
+#else
+	// No available method for this crash handling provider?
+	return false;
+#endif
+}

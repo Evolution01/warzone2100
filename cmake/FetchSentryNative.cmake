@@ -50,7 +50,7 @@ if(CMAKE_SYSTEM_NAME MATCHES "Windows")
 	if(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore")
 		set(CMAKE_SYSTEM_VERSION "10")
 	else()
-		set(CMAKE_SYSTEM_VERSION "6.0") # Windows Vista+
+		set(CMAKE_SYSTEM_VERSION "6.1") # Windows 7+
 	endif()
 endif()
 if(MINGW AND ("${CMAKE_CXX_COMPILER_ID}" MATCHES "Clang"))
@@ -63,12 +63,18 @@ FetchContent_Declare(
 	sentrynative
 	${_sentrynative_fetch_download_options}
 	SOURCE_DIR "${_sentrynative_source_dir}"
-	PATCH_COMMAND ${CMAKE_COMMAND} "-DSOURCE_DIR=<SOURCE_DIR>" -P "${CMAKE_SOURCE_DIR}/lib/exceptionhandler/3rdparty/sentry/PatchSentryNative.cmake"
 )
 FetchContent_GetProperties(sentrynative)
 set(SENTRY_BUILD_SHARED_LIBS OFF CACHE BOOL "Sentry build shared libs" FORCE)
 set(SENTRY_EXPORT_SYMBOLS OFF CACHE BOOL "Export symbols" FORCE)
 set(SENTRY_BUILD_RUNTIMESTATIC OFF CACHE BOOL "Build sentry-native with static runtime" FORCE)
+if(MINGW)
+	SET(CRASHPAD_WER_ENABLED TRUE)
+endif()
+if(CMAKE_CXX_STANDARD)
+	set(_old_CMAKE_CXX_STANDARD "${CMAKE_CXX_STANDARD}")
+	unset(CMAKE_CXX_STANDARD) # Allow sentry-native to set its desired default
+endif()
 if(CMAKE_SYSTEM_NAME MATCHES "Darwin|Linux" AND NOT DEFINED SENTRY_BACKEND)
 	set(SENTRY_BACKEND "breakpad" CACHE STRING
 	"The sentry backend responsible for reporting crashes, can be either 'none', 'inproc', 'breakpad' or 'crashpad'." FORCE)
@@ -78,3 +84,7 @@ if(NOT sentrynative_POPULATED)
 	add_subdirectory("${sentrynative_SOURCE_DIR}" "${sentrynative_BINARY_DIR}" EXCLUDE_FROM_ALL)
 endif()
 message(STATUS "Enabling crash-handling backend: sentry-native ($CACHE{SENTRY_BACKEND})")
+
+if(_old_CMAKE_CXX_STANDARD)
+	set(CMAKE_CXX_STANDARD "${_old_CMAKE_CXX_STANDARD}")
+endif()

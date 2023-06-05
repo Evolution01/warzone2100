@@ -11,16 +11,16 @@ cmake_minimum_required(VERSION 3.5)
 ########################################################
 
 # To ensure reproducible builds, pin to a specific vcpkg commit
-set(VCPKG_COMMIT_SHA "fe5757109de431c2be980144867b26f96aaf422e")
+set(VCPKG_COMMIT_SHA "7f59e0013648f0dd80377330b770b414032233cb")
 
 # WZ minimum supported macOS deployment target (< 10.9 is untested)
 set(MIN_SUPPORTED_MACOSX_DEPLOYMENT_TARGET "10.9")
 
 # Vulkan SDK
-set(VULKAN_SDK_VERSION "1.3.224.1")
+set(VULKAN_SDK_VERSION "1.3.231.1")
 set(VULKAN_SDK_DL_FILENAME "vulkansdk-macos-${VULKAN_SDK_VERSION}.dmg")
 set(VULKAN_SDK_DL_URL "https://sdk.lunarg.com/sdk/download/${VULKAN_SDK_VERSION}/mac/${VULKAN_SDK_DL_FILENAME}?Human=true")
-set(VULKAN_SDK_DL_SHA256 "35e35e8ac0fa13fa90c35253d5160f147ac99b39e296f6502a9dce9f41795838")
+set(VULKAN_SDK_DL_SHA256 "ee63c647eb5108dfb663b701fd3d5e976e9826f991cbe4aaaf43b5bb01971db5")
 
 ########################################################
 
@@ -101,25 +101,25 @@ if((CMAKE_HOST_SYSTEM_NAME MATCHES "^Darwin$") AND (DARWIN_VERSION VERSION_GREAT
 		if(EXISTS "${_full_vulkan_install_path}")
 			file(REMOVE_RECURSE "${_full_vulkan_install_path}")
 		endif()
+
+		# ./InstallVulkan.app/Contents/MacOS/InstallVulkan --root ${_full_vulkan_install_path} --accept-licenses --default-answer --confirm-command install --copy_only=1
+		execute_process(
+			COMMAND ./InstallVulkan.app/Contents/MacOS/InstallVulkan
+					--root ${_full_vulkan_install_path}
+					--accept-licenses
+					--default-answer
+					--confirm-command install
+					copy_only=1
+			WORKING_DIRECTORY "${_full_vulkan_dl_path}"
+			RESULT_VARIABLE _exstatus
+		)
+		if(NOT _exstatus EQUAL 0)
+			message(FATAL_ERROR "Failed to extract Vulkan SDK (exit code: ${_exstatus})")
+		endif()
+
+		file(WRITE "${_full_vulkan_install_path}/.SHA256SumLoc" "${VULKAN_SDK_DL_SHA256}")
 	endif()
 	unset(_strings_existing_sha256)
-
-	# ./InstallVulkan.app/Contents/MacOS/InstallVulkan --root ${_full_vulkan_install_path} --accept-licenses --default-answer --confirm-command install --copy_only=1
-	execute_process(
-		COMMAND ./InstallVulkan.app/Contents/MacOS/InstallVulkan
-				--root ${_full_vulkan_install_path}
-				--accept-licenses
-				--default-answer
-				--confirm-command install
-				copy_only=1
-		WORKING_DIRECTORY "${_full_vulkan_dl_path}"
-		RESULT_VARIABLE _exstatus
-	)
-	if(NOT _exstatus EQUAL 0)
-		message(FATAL_ERROR "Failed to extract Vulkan SDK (exit code: ${_exstatus})")
-	endif()
-
-	file(WRITE "${_full_vulkan_install_path}/.SHA256SumLoc" "${VULKAN_SDK_DL_SHA256}")
 
 	if(DEFINED ENV{GITHUB_ACTIONS} AND "$ENV{GITHUB_ACTIONS}" STREQUAL "true")
 		execute_process(COMMAND ${CMAKE_COMMAND} -E echo "::endgroup::")

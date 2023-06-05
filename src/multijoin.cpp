@@ -198,8 +198,6 @@ void clearPlayer(UDWORD player, bool quietly)
 		return; // no more to do
 	}
 
-	(void)setPlayerName(player, "");				//clear custom player name (will use default instead)
-
 	for (i = 0; i < MAX_PLAYERS; i++)				// remove alliances
 	{
 		// Never remove a player's self-alliance, as the player can be selected and units added via the debug menu
@@ -296,9 +294,17 @@ static void addConsolePlayerLeftMessage(unsigned playerIndex)
 {
 	if (selectedPlayer != playerIndex)
 	{
-		char buf[256];
-		ssprintf(buf, _("%s has Left the Game"), getPlayerName(playerIndex));
-		addConsoleMessage(buf, DEFAULT_JUSTIFY, SYSTEM_MESSAGE);
+		std::string msg = astringf(_("%s has Left the Game"), getPlayerName(playerIndex));
+		addConsoleMessage(msg.c_str(), DEFAULT_JUSTIFY, SYSTEM_MESSAGE);
+	}
+}
+
+static void addConsolePlayerJoinMessage(unsigned playerIndex)
+{
+	if (selectedPlayer != playerIndex)
+	{
+		std::string msg = astringf(_("%s joined the Game"), getPlayerName(playerIndex));
+		addConsoleMessage(msg.c_str(), DEFAULT_JUSTIFY, SYSTEM_MESSAGE);
 	}
 }
 
@@ -417,7 +423,7 @@ bool MultiPlayerJoin(UDWORD playerIndex)
 		// if skirmish and game full, then kick...
 		if (NetPlay.playercount > game.maxPlayers)
 		{
-			kickPlayer(playerIndex, _("The game is already full."), ERROR_FULL);
+			kickPlayer(playerIndex, _("The game is already full."), ERROR_FULL, false);
 		}
 		// send everyone's stats to the new guy
 		{
@@ -437,6 +443,7 @@ bool MultiPlayerJoin(UDWORD playerIndex)
 			sendRoomSystemMessageToSingleReceiver("Lobby slash commands enabled. Type " LOBBY_COMMAND_PREFIX "help to see details.", playerIndex);
 		}
 	}
+	addConsolePlayerJoinMessage(playerIndex);
 	return true;
 }
 
@@ -501,7 +508,7 @@ bool recvDataCheck(NETQUEUE queue)
 			sendInGameSystemMessage(msg);
 			addConsoleMessage(msg, LEFT_JUSTIFY, NOTIFY_MESSAGE);
 
-			kickPlayer(player, _("Your data doesn't match the host's!"), ERROR_WRONGDATA);
+			kickPlayer(player, _("Your data doesn't match the host's!"), ERROR_WRONGDATA, false);
 			debug(LOG_ERROR, "%s (%u) has an incompatible mod. ([%d] got %x, expected %x)", getPlayerName(player), player, i, tempBuffer[i], DataHash[i]);
 
 			return false;

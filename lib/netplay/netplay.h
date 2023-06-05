@@ -564,4 +564,7 @@ private:
 	uint32_t index;
 };
 
+void addIPToBanList(const char *ip, const char *name);
+bool removeIPFromBanList(const char *ip);
+
 #endif

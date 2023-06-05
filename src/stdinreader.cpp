@@ -23,6 +23,7 @@
 #include "lib/framework/wzapp.h"
 #include "lib/netplay/netplay.h"
 #include "multiint.h"
+#include "multistat.h"
 #include "multilobbycommands.h"
 #include "clparse.h"
 
@@ -174,6 +175,24 @@ optional<std::string> getStdInLine()
 	return getNextLineFromBuffer();
 }
 
+static void convertEscapedNewlines(std::string& input)
+{
+	// convert \\n -> \n
+	size_t index = input.find("\\n");
+	while (index != std::string::npos)
+	{
+#if !defined(__clang__) && defined(__GNUC__) && __GNUC__ >= 12
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wrestrict"
+#endif
+		input.replace(index, 2, "\n");
+#if !defined(__clang__) && defined(__GNUC__) && __GNUC__ >= 12
+#pragma GCC diagnostic pop
+#endif
+		index = input.find("\\n", index + 1);
+	}
+}
+
 int stdinThreadFunc(void *)
 {
 	fseek(stdin, 0, SEEK_END);
@@ -297,18 +316,91 @@ int stdinThreadFunc(void *)
 				});
 			}
 		}
+		else if(!strncmpl(line, "kick identity "))
+		{
+			char playeridentitystring[1024] = {0};
+			char kickreasonstr[1024] = {0};
+			int r = sscanf(line, "kick identity %1023s %1023[^\n]s", playeridentitystring, kickreasonstr);
+			if (r != 1 && r != 2)
+			{
+				errlog("WZCMD error: Failed to get player public key or hash!\n");
+			}
+			else
+			{
+				std::string playerIdentityStrCopy(playeridentitystring);
+				std::string kickReasonStrCopy = (r >= 2) ? kickreasonstr : "You have been kicked by the administrator.";
+				convertEscapedNewlines(kickReasonStrCopy);
+				wzAsyncExecOnMainThread([playerIdentityStrCopy, kickReasonStrCopy] {
+					bool foundActivePlayer = false;
+					for (int i = 0; i < MAX_CONNECTED_PLAYERS; i++)
+					{
+						auto player = NetPlay.players[i];
+						if (!isHumanPlayer(i))
+						{
+							continue;
+						}
+
+						bool kickThisPlayer = false;
+						auto& identity = getMultiStats(i).identity;
+						if (identity.empty())
+						{
+							if (playerIdentityStrCopy == "0") // special case for empty identity, in case that happens...
+							{
+								kickThisPlayer = true;
+							}
+							else
+							{
+								continue;
+							}
+						}
+
+						if (!kickThisPlayer)
+						{
+							// Check playerIdentityStrCopy versus both the (b64) public key and the public hash
+							std::string checkIdentityHash = identity.publicHashString();
+							std::string checkPublicKeyB64 = base64Encode(identity.toBytes(EcKey::Public));
+							if (playerIdentityStrCopy == checkPublicKeyB64 || playerIdentityStrCopy == checkIdentityHash)
+							{
+								kickThisPlayer = true;
+							}
+						}
+
+						if (kickThisPlayer)
+						{
+							if (i == NetPlay.hostPlayer)
+							{
+								errlog("WZCMD error: Can't kick host!\n");
+								continue;
+							}
+							kickPlayer(i, kickReasonStrCopy.c_str(), ERROR_KICKED, false);
+							auto KickMessage = astringf("Player %s was kicked by the administrator.", player.name);
+							sendRoomSystemMessage(KickMessage.c_str());
+							foundActivePlayer = true;
+						}
+					}
+					if (!foundActivePlayer)
+					{
+						errlog("WZCMD error: Failed to find currently-connected player with matching public key or hash?\n");
+					}
+				});
+			}
+		}
 		else if(!strncmpl(line, "ban ip "))
 		{
 			char tobanip[1024] = {0};
-			int r = sscanf(line, "ban ip %1023[^\n]s", tobanip);
-			if (r != 1)
+			char banreasonstr[1024] = {0};
+			int r = sscanf(line, "ban ip %1023s %1023[^\n]s", tobanip, banreasonstr);
+			if (r != 1 && r != 2)
 			{
 				errlog("WZCMD error: Failed to get ban ip!\n");
 			}
 			else
 			{
 				std::string banIPStrCopy(tobanip);
-				wzAsyncExecOnMainThread([banIPStrCopy] {
+				std::string banReasonStrCopy = (r >= 2) ? banreasonstr : "You have been banned from joining by the administrator.";
+				convertEscapedNewlines(banReasonStrCopy);
+				wzAsyncExecOnMainThread([banIPStrCopy, banReasonStrCopy] {
+					bool foundActivePlayer = false;
 					for (int i = 0; i < MAX_CONNECTED_PLAYERS; i++)
 					{
 						auto player = NetPlay.players[i];
@@ -318,10 +410,35 @@ int stdinThreadFunc(void *)
 						}
 						if (!strcmp(player.IPtextAddress, banIPStrCopy.c_str()))
 						{
-							kickPlayer(i, "You have been banned from joining by the administrator.", ERROR_INVALID);
+							kickPlayer(i, banReasonStrCopy.c_str(), ERROR_INVALID, true);
 							auto KickMessage = astringf("Player %s was banned by the administrator.", player.name);
 							sendRoomSystemMessage(KickMessage.c_str());
+							foundActivePlayer = true;
 						}
+					}
+					if (!foundActivePlayer)
+					{
+						// add the IP to the ban list anyway
+						addIPToBanList(banIPStrCopy.c_str(), "Banned player");
+					}
+				});
+			}
+		}
+		else if(!strncmpl(line, "unban ip "))
+		{
+			char tounbanip[1024] = {0};
+			int r = sscanf(line, "unban ip %1023[^\n]s", tounbanip);
+			if (r != 1)
+			{
+				errlog("WZCMD error: Failed to get unban ip!\n");
+			}
+			else
+			{
+				std::string unbanIPStrCopy(tounbanip);
+				wzAsyncExecOnMainThread([unbanIPStrCopy] {
+					if (!removeIPFromBanList(unbanIPStrCopy.c_str()))
+					{
+						errlog("WZCMD error: IP was not on the ban list!\n");
 					}
 				});
 			}
@@ -344,6 +461,73 @@ int stdinThreadFunc(void *)
 						errlog("WZCMD error: Failed to send bcast message because host isn't yet hosting!\n");
 					}
 					sendRoomSystemMessage(chatmsgstr.c_str());
+				});
+			}
+		}
+		else if(!strncmpl(line, "chat direct "))
+		{
+			char playeridentitystring[1024] = {0};
+			char chatmsg[1024] = {0};
+			int r = sscanf(line, "chat direct %1023s %1023[^\n]s", playeridentitystring, chatmsg);
+			if (r != 2)
+			{
+				errlog("WZCMD error: Failed to get chat receiver or message!\n");
+			}
+			else
+			{
+				std::string playerIdentityStrCopy(playeridentitystring);
+				std::string chatmsgstr(chatmsg);
+				wzAsyncExecOnMainThread([playerIdentityStrCopy, chatmsgstr] {
+					if (!NetPlay.isHostAlive)
+					{
+						// can't send this message when the host isn't alive
+						errlog("WZCMD error: Failed to send chat direct message because host isn't yet hosting!\n");
+					}
+
+					bool foundActivePlayer = false;
+					for (uint32_t i = 0; i < MAX_CONNECTED_PLAYERS; i++)
+					{
+						auto player = NetPlay.players[i];
+						if (!isHumanPlayer(i))
+						{
+							continue;
+						}
+
+						bool msgThisPlayer = false;
+						auto& identity = getMultiStats(i).identity;
+						if (identity.empty())
+						{
+							if (playerIdentityStrCopy == "0") // special case for empty identity, in case that happens...
+							{
+								msgThisPlayer = true;
+							}
+							else
+							{
+								continue;
+							}
+						}
+
+						if (!msgThisPlayer)
+						{
+							// Check playerIdentityStrCopy versus both the (b64) public key and the public hash
+							std::string checkIdentityHash = identity.publicHashString();
+							std::string checkPublicKeyB64 = base64Encode(identity.toBytes(EcKey::Public));
+							if (playerIdentityStrCopy == checkPublicKeyB64 || playerIdentityStrCopy == checkIdentityHash)
+							{
+								msgThisPlayer = true;
+							}
+						}
+
+						if (msgThisPlayer)
+						{
+							sendRoomSystemMessageToSingleReceiver(chatmsgstr.c_str(), i);
+							foundActivePlayer = true;
+						}
+					}
+					if (!foundActivePlayer)
+					{
+						errlog("WZCMD error: Failed to find currently-connected player with matching public key or hash?\n");
+					}
 				});
 			}
 		}

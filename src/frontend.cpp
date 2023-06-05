@@ -616,7 +616,9 @@ void startMultiPlayerMenu()
 	addMultiBut(psWScreen, FRONTEND_BOTFORM, FRONTEND_QUIT, 10, 10, 30, 29, P_("menu", "Return"), IMAGE_RETURN, IMAGE_RETURN_HI, IMAGE_RETURN_HI);
 
 	// This isn't really a hyperlink for now... perhaps link to the wiki ?
-	addSmallTextButton(FRONTEND_HYPERLINK, FRONTEND_POS9X, FRONTEND_POS9Y, _("TCP port 2100 must be opened in your firewall or router to host games!"), 0);
+	char buf[512]  =  {'\0'};
+	snprintf(buf, sizeof(buf), _("TCP port %d must be opened in your firewall or router to host games!"), NETgetGameserverPort());
+	addSmallTextButton(FRONTEND_HYPERLINK, FRONTEND_POS9X, FRONTEND_POS9Y, buf, 0);
 }
 
 bool runMultiPlayerMenu()
@@ -2150,6 +2152,56 @@ char const *mouseOptionsCursorModeString()
 	return war_GetColouredCursor() ? _("On") : _("Off");
 }
 
+static std::shared_ptr<WIDGET> makeCursorScaleDropdown()
+{
+	std::vector<std::tuple<WzString, unsigned int>> dropDownChoices = {
+		{"100%", 100},
+		{"125%", 125},
+		{"150%", 150},
+		{"200%", 200}
+	};
+
+	// If current value (from config) is not one of the presets in dropDownChoices, add a "Custom" entry
+	size_t currentSettingIdx = 0;
+	unsigned int currValue = war_getCursorScale();
+	auto it = std::find_if(dropDownChoices.begin(), dropDownChoices.end(), [currValue](const std::tuple<WzString, int>& item) -> bool {
+		return std::get<1>(item) == currValue;
+	});
+	if (it != dropDownChoices.end())
+	{
+		currentSettingIdx = it - dropDownChoices.begin();
+	}
+	else
+	{
+		dropDownChoices.push_back({WzString::fromUtf8(astringf("(%u%%)", currValue)), currValue});
+		currentSettingIdx = dropDownChoices.size() - 1;
+	}
+
+	auto dropdown = std::make_shared<DropdownWidget>();
+	dropdown->id = FRONTEND_CURSORSCALE_DROPDOWN;
+	dropdown->setListHeight(FRONTEND_BUTHEIGHT * std::min<uint32_t>(5, dropDownChoices.size()));
+	const auto paddingSize = 10;
+
+	for (const auto& option : dropDownChoices)
+	{
+		auto item = makeTextButton(0, std::get<0>(option).toUtf8(), 0);
+		dropdown->addItem(Margin(0, paddingSize).wrap(item));
+	}
+
+	dropdown->setSelectedIndex(currentSettingIdx);
+
+	dropdown->setCanChange([dropDownChoices](DropdownWidget &widget, size_t newIndex, std::shared_ptr<WIDGET> newSelectedWidget) -> bool {
+		ASSERT_OR_RETURN(false, newIndex < dropDownChoices.size(), "Invalid index");
+		if (wzChangeCursorScale(std::get<1>(dropDownChoices.at(newIndex))))
+		{
+			return true;
+		}
+		return false;
+	});
+
+	return Margin(0, -paddingSize).wrap(dropdown);
+}
+
 // ////////////////////////////////////////////////////////////////////////////
 // Mouse Options
 void startMouseOptionsMenu()
@@ -2189,6 +2241,11 @@ void startMouseOptionsMenu()
 	// Hardware / software cursor toggle
 	grid->place({0}, row, addMargin(makeTextButton(FRONTEND_CURSORMODE, _("Colored Cursors"), WBUT_SECONDARY)));
 	grid->place({1, 1, false}, row, addMargin(makeTextButton(FRONTEND_CURSORMODE_R, mouseOptionsCursorModeString(), WBUT_SECONDARY)));
+	row.start++;
+
+	// Cursor Size / Scaling
+	grid->place({0}, row, addMargin(makeTextButton(FRONTEND_CURSORSCALE, _("Cursor Size"), WBUT_SECONDARY)));
+	grid->place({1, 1, false}, row, addMargin(makeCursorScaleDropdown()));
 	row.start++;
 
 	grid->setGeometry(0, 0, FRONTEND_BUTWIDTH, grid->idealHeight());

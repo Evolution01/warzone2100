@@ -462,6 +462,7 @@ bool loadStructureStats(WzConfig &ini)
 		{
 			ASSERT(false, "Invalid type '%s' of structure '%s'", type.toUtf8().c_str(), getID(psStats));
 			// nothing we can really do here except skip this stat
+			unloadStructureStats_BaseStats(*psStats); // must be called to properly clear from lookup tables (that loadStructureStats_BaseStats adds it to)
 			ini.endGroup();
 			continue;
 		}
@@ -570,12 +571,24 @@ bool loadStructureStats(WzConfig &ini)
 		}
 
 		int ecm = getCompFromName(COMP_ECM, ini.value("ecmID", "ZNULLECM").toWzString());
-		ASSERT(ecm >= 0, "Invalid ECM found for '%s'", getID(psStats));
-		psStats->pECM = asECMStats + ecm;
+		if (ecm >= 0)
+		{
+			psStats->pECM = asECMStats + ecm;
+		}
+		else
+		{
+			ASSERT(ecm >= 0, "Invalid ECM found for '%s'", getID(psStats));
+		}
 
 		int sensor = getCompFromName(COMP_SENSOR, ini.value("sensorID", "ZNULLSENSOR").toWzString());
-		ASSERT(sensor >= 0, "Invalid sensor found for structure '%s'", getID(psStats));
-		psStats->pSensor = asSensorStats + sensor;
+		if (sensor >= 0)
+		{
+			psStats->pSensor = asSensorStats + sensor;
+		}
+		else
+		{
+			ASSERT(sensor >= 0, "Invalid sensor found for structure '%s'", getID(psStats));
+		}
 
 		// set list of weapons
 		std::fill_n(psStats->psWeapStat, MAX_WEAPONS, (WEAPON_STATS *)nullptr);
@@ -2422,13 +2435,12 @@ static bool structPlaceDroid(STRUCTURE *psStructure, DROID_TEMPLATE *psTempl, DR
 				// Transporters can't be assigned to commanders, due to abuse of .psGroup. Try to land on the commander instead. Hopefully the transport is heavy enough to crush the commander.
 				orderDroidLoc(psNewDroid, DORDER_MOVE, psFact->psCommander->pos.x, psFact->psCommander->pos.y, ModeQueue);
 			}
-			else if (idfDroid(psNewDroid) ||
-			         isVtolDroid(psNewDroid))
+			else if (isVtolDroid(psNewDroid))
 			{
 				orderDroidObj(psNewDroid, DORDER_FIRESUPPORT, psFact->psCommander, ModeQueue);
 				//moveToRearm(psNewDroid);
 			}
-			else
+			else if (!isConstructionDroid(psNewDroid))
 			{
 				orderDroidObj(psNewDroid, DORDER_COMMANDERSUPPORT, psFact->psCommander, ModeQueue);
 			}
@@ -2750,8 +2762,12 @@ RepairState aiUpdateRepair_handleEvents(STRUCTURE &station, RepairEvents ev, DRO
 		objTrace(psStructure->id, "Repair complete of droid %d", (int)psDroid->id);
 		psDroid->body = psDroid->originalBody;
 		// if completely repaired reset order
-		secondarySetState(psDroid, DSO_RETURN_TO_LOC, DSS_NONE);
+		objTrace(psDroid->id, "was fully repaired by RF");
 		droidWasFullyRepaired(psDroid, psRepairFac);
+		// only call "secondarySetState" *after* triggering "droidWasFullyRepaired"
+		// because in some cases calling it would modify primary order
+		// thus, loosing information that we actually had a RTR|RTR_SPECIFIED before
+		secondarySetState(psDroid, DSO_RETURN_TO_LOC, DSS_NONE);
 		return RepairState::Idle;
 	};
 	case RepairEvents::UnitDied:
@@ -3883,6 +3899,8 @@ std::vector<STRUCTURE_STATS *> fillStructureList(UDWORD _selectedPlayer, UDWORD 
 				if (missionIsOffworld())
 				{
 					if (psBuilding->type == REF_FACTORY ||
+					    psBuilding->type == REF_COMMAND_CONTROL ||
+					    psBuilding->type == REF_HQ ||
 					    psBuilding->type == REF_POWER_GEN ||
 					    psBuilding->type == REF_RESOURCE_EXTRACTOR ||
 					    psBuilding->type == REF_RESEARCH ||

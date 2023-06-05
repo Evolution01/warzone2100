@@ -141,6 +141,7 @@ void _vk_setenv(const _vkl_env_text_type& name, const _vkl_env_text_type& value)
 const std::vector<std::pair<_vkl_env_text_type, _vkl_env_text_type>> vulkan_implicit_layer_environment_variables = {
 	{_vkl_env_text("DISABLE_VK_LAYER_VALVE_steam_overlay_1"), _vkl_env_text("1")}
 	, {_vkl_env_text("DISABLE_VK_LAYER_VALVE_steam_fossilize_1"), _vkl_env_text("1")}
+	, {_vkl_env_text("DISABLE_FPSMON_LAYER"), _vkl_env_text("1")} // avoid crashes caused by this layer
 };
 
 #if defined(WZ_DEBUG_GFX_API_LEAKS)
@@ -197,6 +198,17 @@ static uint32_t findProperties(const vk::PhysicalDeviceMemoryProperties& memprop
 		}
 	}
 	return -1;
+}
+
+[[noreturn]] static void handleUnrecoverableError(const vk::Result& reason)
+{
+	if (reason == vk::Result::eErrorDeviceLost)
+	{
+		// FUTURE TODO: Output a bunch more debugging info to the debug log?
+	}
+	// Display a message and prompt the user to try a different graphics backend next time
+	wzPromptToChangeGfxBackendOnFailure("Failed with error: " + vk::to_string(reason));
+	abort();
 }
 
 bool checkFormatSupport(const vk::PhysicalDevice& physicalDevice, vk::Format format, vk::ImageTiling tiling, vk::FormatFeatureFlags features, const vk::DispatchLoaderDynamic& vkDynLoader)
@@ -306,16 +318,23 @@ std::vector<const char*> findSupportedDeviceExtensions(const vk::PhysicalDevice 
 
 bool checkDeviceExtensionSupport(const vk::PhysicalDevice &device, const std::vector<const char*> &desiredExtensions, const vk::DispatchLoaderDynamic &vkDynLoader)
 {
-	const auto availableExtensions = device.enumerateDeviceExtensionProperties(nullptr, vkDynLoader); // TODO: handle thrown error?
+	try {
+		const auto availableExtensions = device.enumerateDeviceExtensionProperties(nullptr, vkDynLoader);
 
-	std::unordered_set<std::string> requiredExtensions(desiredExtensions.begin(), desiredExtensions.end());
+		std::unordered_set<std::string> requiredExtensions(desiredExtensions.begin(), desiredExtensions.end());
 
-	for (const auto& extension : availableExtensions)
-	{
-		requiredExtensions.erase(extension.extensionName);
+		for (const auto& extension : availableExtensions)
+		{
+			requiredExtensions.erase(extension.extensionName);
+		}
+
+		return requiredExtensions.empty();
 	}
-
-	return requiredExtensions.empty();
+	catch (const vk::SystemError& e)
+	{
+		debug(LOG_ERROR, "vkEnumerateDeviceExtensionProperties failed with error: %s", e.what());
+	}
+	return false;
 }
 
 bool VkRoot::getSupportedInstanceExtensions(std::vector<VkExtensionProperties> &output, PFN_vkGetInstanceProcAddr _vkGetInstanceProcAddr)
@@ -984,13 +1003,15 @@ struct shader_infos
 static const std::map<SHADER_MODE, shader_infos> spv_files
 {
 	std::make_pair(SHADER_COMPONENT, shader_infos{ "shaders/vk/tcmask.vert.spv", "shaders/vk/tcmask.frag.spv", true }),
-	std::make_pair(SHADER_BUTTON, shader_infos{ "shaders/vk/button.vert.spv", "shaders/vk/button.frag.spv", true }),
+	std::make_pair(SHADER_COMPONENT_INSTANCED, shader_infos{ "shaders/vk/tcmask_instanced.vert.spv", "shaders/vk/tcmask_instanced.frag.spv", true }),
 	std::make_pair(SHADER_NOLIGHT, shader_infos{ "shaders/vk/nolight.vert.spv", "shaders/vk/nolight.frag.spv", true }),
+	std::make_pair(SHADER_NOLIGHT_INSTANCED, shader_infos{ "shaders/vk/nolight_instanced.vert.spv", "shaders/vk/nolight_instanced.frag.spv", true }),
 	std::make_pair(SHADER_TERRAIN, shader_infos{ "shaders/vk/terrain.vert.spv", "shaders/vk/terrain.frag.spv", true }),
 	std::make_pair(SHADER_TERRAIN_DEPTH, shader_infos{ "shaders/vk/terrain_depth.vert.spv", "shaders/vk/terraindepth.frag.spv" }),
 	std::make_pair(SHADER_DECALS, shader_infos{ "shaders/vk/decals.vert.spv", "shaders/vk/decals.frag.spv", true }),
 	std::make_pair(SHADER_WATER, shader_infos{ "shaders/vk/terrain_water.vert.spv", "shaders/vk/water.frag.spv" }),
 	std::make_pair(SHADER_RECT, shader_infos{ "shaders/vk/rect.vert.spv", "shaders/vk/rect.frag.spv" }),
+	std::make_pair(SHADER_RECT_INSTANCED, shader_infos{ "shaders/vk/rect_instanced.vert.spv", "shaders/vk/rect_instanced.frag.spv" }),
 	std::make_pair(SHADER_TEXRECT, shader_infos{ "shaders/vk/rect.vert.spv", "shaders/vk/texturedrect.frag.spv" }),
 	std::make_pair(SHADER_GFX_COLOUR, shader_infos{ "shaders/vk/gfx_color.vert.spv", "shaders/vk/gfx.frag.spv" }),
 	std::make_pair(SHADER_GFX_TEXT, shader_infos{ "shaders/vk/gfx_text.vert.spv", "shaders/vk/texturedrect.frag.spv" }),
@@ -1449,7 +1470,7 @@ VkPSO::VkPSO(vk::Device _dev,
 			vk::VertexInputBindingDescription()
 			.setBinding(buffer_id)
 			.setStride(static_cast<uint32_t>(buffer.stride))
-			.setInputRate(vk::VertexInputRate::eVertex)
+			.setInputRate((buffer.rate == gfx_api::vertex_attribute_input_rate::instance) ? vk::VertexInputRate::eInstance : vk::VertexInputRate::eVertex)
 		);
 		for (const auto& attribute : buffer.attributes)
 		{
@@ -2258,8 +2279,14 @@ int rateDeviceSuitability(const vk::PhysicalDevice &device, const vk::SurfaceKHR
 	}
 
 	// Check that swapchain is suitable
-	SwapChainSupportDetails swapChainSupportDetails = querySwapChainSupport(device, surface, vkDynLoader);
-	if (swapChainSupportDetails.formats.empty() || swapChainSupportDetails.presentModes.empty())
+	try {
+		SwapChainSupportDetails swapChainSupportDetails = querySwapChainSupport(device, surface, vkDynLoader);
+		if (swapChainSupportDetails.formats.empty() || swapChainSupportDetails.presentModes.empty())
+		{
+			return 0;
+		}
+	}
+	catch (const vk::SystemError&)
 	{
 		return 0;
 	}
@@ -2743,7 +2770,15 @@ bool VkRoot::createSwapchain()
 	debug(LOG_3D, "createSwapchain()");
 
 	currentSwapchainIndex = 0;
-	SwapChainSupportDetails swapChainSupport = querySwapChainSupport(physicalDevice, surface, vkDynLoader);
+	SwapChainSupportDetails swapChainSupport;
+	try {
+		swapChainSupport = querySwapChainSupport(physicalDevice, surface, vkDynLoader);
+	}
+	catch (const vk::SystemError &e)
+	{
+		debug(LOG_ERROR, "Querying swapchain support failed with error: %s", e.what());
+		return false;
+	}
 
 	if (!findBestAvailablePresentModeForSwapMode(swapChainSupport.presentModes, swapMode, presentMode))
 	{
@@ -2831,7 +2866,20 @@ bool VkRoot::createSwapchain()
 	try {
 		swapchain = dev.createSwapchainKHR(createSwapchainInfo, nullptr, vkDynLoader);
 	}
-	catch (vk::SystemError &e)
+	catch (const vk::OutOfHostMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateImageView(swapchainImages): OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateImageView(swapchainImages): OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
+	catch (const vk::InitializationFailedError& e)
+	{
+		debug(LOG_ERROR, "vk::Device::createSwapchainKHR: InitializationFailedError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorInitializationFailed);
+	}
+	catch (const vk::SystemError &e)
 	{
 		debug(LOG_ERROR, "vk::Device::createSwapchainKHR: failed with error: %s", e.what());
 		return false;
@@ -2845,7 +2893,8 @@ bool VkRoot::createSwapchain()
 	// createSwapchainImageViews
 	std::vector<vk::Image> swapchainImages = dev.getSwapchainImagesKHR(swapchain, vkDynLoader);
 	debug(LOG_3D, "Requested swapchain minImageCount: %" PRIu32", received: %zu", swapchainDesiredImageCount, swapchainImages.size());
-	std::transform(swapchainImages.begin(), swapchainImages.end(), std::back_inserter(swapchainImageView),
+	try {
+		std::transform(swapchainImages.begin(), swapchainImages.end(), std::back_inserter(swapchainImageView),
 				   [&](const vk::Image& img) {
 					   return dev.createImageView(
 												  vk::ImageViewCreateInfo()
@@ -2856,52 +2905,102 @@ bool VkRoot::createSwapchain()
 												  .setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1))
 												  , nullptr, vkDynLoader);
 				   });
+	}
+	catch (const vk::OutOfHostMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateImageView(swapchainImages): OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateImageView(swapchainImages): OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
 	//
 
-	buffering_mechanism::init(dev, allocator, MAX_FRAMES_IN_FLIGHT, queueFamilyIndices.graphicsFamily.value(), vkDynLoader);
+	try {
+		buffering_mechanism::init(dev, allocator, MAX_FRAMES_IN_FLIGHT, queueFamilyIndices.graphicsFamily.value(), vkDynLoader);
+	}
+	catch (const vk::OutOfHostMemoryError& e) {
+		debug(LOG_ERROR, "buffering_mechanism init: OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e) {
+		debug(LOG_ERROR, "buffering_mechanism init: OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
 
 	// createColorResources
 	vk::Format colorFormat = surfaceFormat.format;
 
-	colorImage = dev.createImage(
-		vk::ImageCreateInfo()
-			.setFormat(colorFormat)
-			.setArrayLayers(1)
-			.setExtent(vk::Extent3D(swapchainSize.width, swapchainSize.height, 1))
-			.setImageType(vk::ImageType::e2D)
-			.setMipLevels(1)
-			.setSamples(msaaSamples)
-			.setTiling(vk::ImageTiling::eOptimal)
-			.setUsage(vk::ImageUsageFlagBits::eTransientAttachment | vk::ImageUsageFlagBits::eColorAttachment)
-			.setSharingMode(vk::SharingMode::eExclusive)
-		, nullptr, vkDynLoader
-	);
+	try {
+		colorImage = dev.createImage(
+			vk::ImageCreateInfo()
+				.setFormat(colorFormat)
+				.setArrayLayers(1)
+				.setExtent(vk::Extent3D(swapchainSize.width, swapchainSize.height, 1))
+				.setImageType(vk::ImageType::e2D)
+				.setMipLevels(1)
+				.setSamples(msaaSamples)
+				.setTiling(vk::ImageTiling::eOptimal)
+				.setUsage(vk::ImageUsageFlagBits::eTransientAttachment | vk::ImageUsageFlagBits::eColorAttachment)
+				.setSharingMode(vk::SharingMode::eExclusive)
+			, nullptr, vkDynLoader
+		);
+	}
+	catch (const vk::OutOfHostMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateImage (colorImage): OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateImage (colorImage): OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
 
 	const auto colorImage_memreq = dev.getImageMemoryRequirements(colorImage, vkDynLoader);
 	ASSERT(colorImage_memreq.size > 0, "Attempting to allocate memory of size 0 will fail");
-	colorImageMemory = dev.allocateMemory(
-		vk::MemoryAllocateInfo()
-			.setAllocationSize(colorImage_memreq.size)
-			.setMemoryTypeIndex(findProperties(memprops, colorImage_memreq.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal))
-		, nullptr, vkDynLoader
-	);
+	try {
+		colorImageMemory = dev.allocateMemory(
+			vk::MemoryAllocateInfo()
+				.setAllocationSize(colorImage_memreq.size)
+				.setMemoryTypeIndex(findProperties(memprops, colorImage_memreq.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal))
+			, nullptr, vkDynLoader
+		);
 
-	dev.bindImageMemory(colorImage, colorImageMemory, 0, vkDynLoader);
+		dev.bindImageMemory(colorImage, colorImageMemory, 0, vkDynLoader);
+	}
+	catch (const vk::OutOfHostMemoryError& e) {
+		debug(LOG_ERROR, "vkAllocateMemory / vkBindImageMemory (colorImage): OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e) {
+		debug(LOG_ERROR, "vkAllocateMemory / vkBindImageMemory (colorImage): OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
 
-	colorImageView = dev.createImageView(
-	   vk::ImageViewCreateInfo()
-		   .setFormat(colorFormat)
-		   .setImage(colorImage)
-		   .setViewType(vk::ImageViewType::e2D)
-		   .setComponents(vk::ComponentMapping())
-		   .setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1))
-		, nullptr, vkDynLoader
-	);
+	try {
+		colorImageView = dev.createImageView(
+		   vk::ImageViewCreateInfo()
+			   .setFormat(colorFormat)
+			   .setImage(colorImage)
+			   .setViewType(vk::ImageViewType::e2D)
+			   .setComponents(vk::ComponentMapping())
+			   .setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1))
+			, nullptr, vkDynLoader
+		);
+	}
+	catch (const vk::OutOfHostMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateImageView (colorImage): OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateImageView (colorImage): OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
 
 	// createDepthStencilImage
 	vk::Format depthFormat = findDepthFormat(physicalDevice, vkDynLoader);
 
-	depthStencilImage = dev.createImage(
+	try {
+		depthStencilImage = dev.createImage(
 										vk::ImageCreateInfo()
 										.setFormat(depthFormat)
 										.setArrayLayers(1)
@@ -2913,32 +3012,73 @@ bool VkRoot::createSwapchain()
 										.setUsage(vk::ImageUsageFlagBits::eDepthStencilAttachment)
 										.setSharingMode(vk::SharingMode::eExclusive)
 										, nullptr, vkDynLoader);
+	}
+	catch (const vk::OutOfHostMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateImage (depthStencilImage): OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateImage (depthStencilImage): OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
 
 	const auto memreq = dev.getImageMemoryRequirements(depthStencilImage, vkDynLoader);
-	depthStencilMemory = dev.allocateMemory(
-											vk::MemoryAllocateInfo()
-											.setAllocationSize(memreq.size)
-											.setMemoryTypeIndex(findProperties(memprops, memreq.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal))
-											, nullptr, vkDynLoader);
-	dev.bindImageMemory(depthStencilImage, depthStencilMemory, 0, vkDynLoader);
 
-	depthStencilView = dev.createImageView(
-										   vk::ImageViewCreateInfo()
-										   .setFormat(depthFormat)
-										   .setImage(depthStencilImage)
-										   .setViewType(vk::ImageViewType::e2D)
-										   .setComponents(vk::ComponentMapping())
-										   .setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil, 0, 1, 0, 1))
-										   , nullptr, vkDynLoader);
+	try {
+		depthStencilMemory = dev.allocateMemory(
+												vk::MemoryAllocateInfo()
+												.setAllocationSize(memreq.size)
+												.setMemoryTypeIndex(findProperties(memprops, memreq.memoryTypeBits, vk::MemoryPropertyFlagBits::eDeviceLocal))
+												, nullptr, vkDynLoader);
+		dev.bindImageMemory(depthStencilImage, depthStencilMemory, 0, vkDynLoader);
+	}
+	catch (const vk::OutOfHostMemoryError& e) {
+		debug(LOG_ERROR, "vkAllocateMemory / vkBindImageMemory (depthStencil): OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e) {
+		debug(LOG_ERROR, "vkAllocateMemory / vkBindImageMemory (depthStencil): OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
+
+	try {
+		depthStencilView = dev.createImageView(
+											   vk::ImageViewCreateInfo()
+											   .setFormat(depthFormat)
+											   .setImage(depthStencilImage)
+											   .setViewType(vk::ImageViewType::e2D)
+											   .setComponents(vk::ComponentMapping())
+											   .setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil, 0, 1, 0, 1))
+											   , nullptr, vkDynLoader);
+	}
+	catch (const vk::OutOfHostMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateImageView (depthStencil): OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateImageView (depthStencil): OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
 	//
 
 	setupSwapchainImages();
 
-	createDefaultRenderpass(surfaceFormat.format, depthFormat);
+	try {
+		createDefaultRenderpass(surfaceFormat.format, depthFormat);
+	}
+	catch (const vk::OutOfHostMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateRenderPass (default): OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateRenderPass (default): OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
 
 	// createFramebuffers()
 	bool msaaEnabled = (msaaSamples != vk::SampleCountFlagBits::e1);
-	std::transform(swapchainImageView.begin(), swapchainImageView.end(), std::back_inserter(fbo),
+	try {
+		std::transform(swapchainImageView.begin(), swapchainImageView.end(), std::back_inserter(fbo),
 				   [&](const vk::ImageView& imageView) {
 					   const auto attachments = (msaaEnabled) ? std::vector<vk::ImageView>{colorImageView, depthStencilView, imageView}
 					   											: std::vector<vk::ImageView>{imageView, depthStencilView};
@@ -2952,6 +3092,15 @@ bool VkRoot::createSwapchain()
 													.setRenderPass(rp)
 													, nullptr, vkDynLoader);
 				   });
+	}
+	catch (const vk::OutOfHostMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateFramebuffer: OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e) {
+		debug(LOG_ERROR, "vkCreateFramebuffer: OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
 
 	auto acquireNextResult = acquireNextSwapchainImage();
 	switch (acquireNextResult)
@@ -3049,8 +3198,23 @@ bool VkRoot::_initialize(const gfx_api::backend_Impl_Factory& impl, int32_t anti
 			maxRequestableInstanceVulkanVersion
 	); // cap requestedInstanceApiVersion to maxRequestableInstanceVulkanVersion
 
-	debugInfo.Output_GlobalInstanceExtensions(_vkGetInstanceProcAddr);
-	debugInfo.Output_InstanceLayerProperties(_vkGetInstanceProcAddr);
+	try {
+		debugInfo.Output_GlobalInstanceExtensions(_vkGetInstanceProcAddr);
+	}
+	catch (const vk::SystemError& e)
+	{
+		// catch any weird errors that debugInfo didn't handle
+		debug(LOG_ERROR, "Output_GlobalInstanceExtensions failed: %s", e.what());
+	}
+
+	try {
+		debugInfo.Output_InstanceLayerProperties(_vkGetInstanceProcAddr);
+	}
+	catch (const vk::SystemError& e)
+	{
+		// catch any weird errors that debugInfo didn't handle
+		debug(LOG_ERROR, "Output_InstanceLayerProperties failed: %s", e.what());
+	}
 
 	instanceExtensions.clear();
 
@@ -3146,7 +3310,14 @@ bool VkRoot::_initialize(const gfx_api::backend_Impl_Factory& impl, int32_t anti
 		ASSERT(vkDynLoader.vkSetDebugUtilsObjectNameEXT != nullptr, "VK_EXT_debug_utils is enabled, but vkSetDebugUtilsObjectNameEXT is null??");
 	}
 
-	debugInfo.Output_PhysicalDevices(inst, appInfo, instanceExtensions, vkDynLoader);
+	try {
+		debugInfo.Output_PhysicalDevices(inst, appInfo, instanceExtensions, vkDynLoader);
+	}
+	catch (const vk::SystemError& e)
+	{
+		// catch any weird errors that debugInfo didn't handle
+		debug(LOG_ERROR, "Output_PhysicalDevices failed: %s", e.what());
+	}
 
 	if (!createSurface())
 	{
@@ -3244,7 +3415,14 @@ bool VkRoot::_initialize(const gfx_api::backend_Impl_Factory& impl, int32_t anti
 	}
 	debug(LOG_3D, "Using sample count: %s", to_string(msaaSamples).c_str());
 
-	debugInfo.Output_SurfaceInformation(physicalDevice, surface, vkDynLoader);
+	try {
+		debugInfo.Output_SurfaceInformation(physicalDevice, surface, vkDynLoader);
+	}
+	catch (const vk::SystemError& e)
+	{
+		// catch any weird errors that debugInfo didn't handle
+		debug(LOG_ERROR, "Output_SurfaceInformation failed: %s", e.what());
+	}
 
 	getQueueFamiliesInfo();
 
@@ -3450,7 +3628,7 @@ bool VkRoot::createLogicalDevice()
 	try {
 		dev = physicalDevice.createDevice(deviceCreateInfo, nullptr, vkDynLoader);
 	}
-	catch (vk::SystemError& e)
+	catch (const vk::SystemError& e)
 	{
 		debug(LOG_ERROR, "vk::PhysicalDevice::createDevice: failed with error: %s", e.what());
 		// TODO: Any cleanup here?
@@ -3553,12 +3731,27 @@ void VkRoot::draw(const std::size_t& offset, const std::size_t& count, const gfx
 	buffering_mechanism::get_current_resources().cmdDraw.draw(static_cast<uint32_t>(count), 1, static_cast<uint32_t>(offset), 0, vkDynLoader);
 }
 
+void VkRoot::draw_instanced(const std::size_t& offset, const std::size_t &count, const gfx_api::primitive_type &primitive, std::size_t instance_count)
+{
+	ASSERT(offset <= static_cast<size_t>(std::numeric_limits<uint32_t>::max()), "offset (%zu) exceeds uint32_t max", offset);
+	ASSERT(count <= static_cast<size_t>(std::numeric_limits<uint32_t>::max()), "count (%zu) exceeds uint32_t max", count);
+	buffering_mechanism::get_current_resources().cmdDraw.draw(static_cast<uint32_t>(count), static_cast<uint32_t>(instance_count), static_cast<uint32_t>(offset), 0, vkDynLoader);
+}
+
 void VkRoot::draw_elements(const std::size_t& offset, const std::size_t& count, const gfx_api::primitive_type&, const gfx_api::index_type&)
 {
 	ASSERT_OR_RETURN(, currentPSO != nullptr, "currentPSO == NULL");
 	ASSERT(offset <= static_cast<size_t>(std::numeric_limits<uint32_t>::max()), "offset (%zu) exceeds uint32_t max", offset);
 	ASSERT(count <= static_cast<size_t>(std::numeric_limits<uint32_t>::max()), "count (%zu) exceeds uint32_t max", count);
 	buffering_mechanism::get_current_resources().cmdDraw.drawIndexed(static_cast<uint32_t>(count), 1, static_cast<uint32_t>(offset) >> 2, 0, 0, vkDynLoader);
+}
+
+void VkRoot::draw_elements_instanced(const std::size_t& offset, const std::size_t &count, const gfx_api::primitive_type &primitive, const gfx_api::index_type& index, std::size_t instance_count)
+{
+	ASSERT_OR_RETURN(, currentPSO != nullptr, "currentPSO == NULL");
+	ASSERT(offset <= static_cast<size_t>(std::numeric_limits<uint32_t>::max()), "offset (%zu) exceeds uint32_t max", offset);
+	ASSERT(count <= static_cast<size_t>(std::numeric_limits<uint32_t>::max()), "count (%zu) exceeds uint32_t max", count);
+	buffering_mechanism::get_current_resources().cmdDraw.drawIndexed(static_cast<uint32_t>(count), static_cast<uint32_t>(instance_count), static_cast<uint32_t>(offset) >> 2, 0, 0, vkDynLoader);
 }
 
 void VkRoot::bind_vertex_buffers(const std::size_t& first, const std::vector<std::tuple<gfx_api::buffer*, std::size_t>>& vertex_buffers_offset)
@@ -3646,13 +3839,56 @@ void VkRoot::setupSwapchainImages()
 
 	internalCommandBuffer.end(vkDynLoader);
 
-	graphicsQueue.submit(
-		vk::SubmitInfo()
-		.setCommandBufferCount(1)
-		.setPCommandBuffers(&internalCommandBuffer),
-		vk::Fence()
-		, vkDynLoader);
-	graphicsQueue.waitIdle(vkDynLoader);
+	try {
+		graphicsQueue.submit(
+			vk::SubmitInfo()
+			.setCommandBufferCount(1)
+			.setPCommandBuffers(&internalCommandBuffer),
+			vk::Fence()
+			, vkDynLoader);
+	}
+	catch (const vk::OutOfHostMemoryError& e)
+	{
+		debug(LOG_ERROR, "vk::Queue::submit: OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e)
+	{
+		debug(LOG_ERROR, "vk::Queue::submit: OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
+	catch (const vk::DeviceLostError& e)
+	{
+		debug(LOG_ERROR, "vk::Queue::submit: DeviceLostError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorDeviceLost);
+	}
+	catch (const vk::SystemError& e)
+	{
+		debug(LOG_FATAL, "vk::Queue::submit: unhandled error: %s", e.what());
+	}
+
+	try {
+		graphicsQueue.waitIdle(vkDynLoader);
+	}
+	catch (const vk::OutOfHostMemoryError& e)
+	{
+		debug(LOG_ERROR, "vk::Queue::waitIdle: OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e)
+	{
+		debug(LOG_ERROR, "vk::Queue::waitIdle: OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
+	catch (const vk::DeviceLostError& e)
+	{
+		debug(LOG_ERROR, "vk::Queue::waitIdle: DeviceLostError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorDeviceLost);
+	}
+	catch (const vk::SystemError& e)
+	{
+		debug(LOG_FATAL, "vk::Queue::waitIdle: unhandled error: %s", e.what());
+	}
 }
 
 vk::Format VkRoot::get_format(const gfx_api::pixel_format& format) const
@@ -3704,6 +3940,11 @@ bool VkRoot::textureFormatIsSupported(gfx_api::pixel_format_target target, gfx_a
 	size_t formatIdx = static_cast<size_t>(format);
 	ASSERT_OR_RETURN(false, formatIdx < texture2DFormatsSupport.size(), "Invalid format index: %zu", formatIdx);
 	return (texture2DFormatsSupport[formatIdx] & usage) == usage;
+}
+
+bool VkRoot::supportsInstancedRendering()
+{
+	return true;
 }
 
 gfx_api::texture* VkRoot::create_texture(const std::size_t& mipmap_count, const std::size_t& width, const std::size_t& height, const gfx_api::pixel_format& internal_format, const std::string& filename)
@@ -3884,7 +4125,7 @@ VkRoot::AcquireNextSwapchainImageResult VkRoot::acquireNextSwapchainImage()
 	try {
 		acquireNextImageResult = dev.acquireNextImageKHR(swapchain, -1, buffering_mechanism::get_current_swapchain_resources().imageAcquireSemaphore, vk::Fence(), vkDynLoader);
 	}
-	catch (vk::OutOfDateKHRError&)
+	catch (const vk::OutOfDateKHRError&)
 	{
 		debug(LOG_3D, "vk::Device::acquireNextImageKHR: ErrorOutOfDateKHR - must recreate swapchain");
 		if (createNewSwapchainAndSwapchainSpecificStuff(vk::Result::eErrorOutOfDateKHR))
@@ -3893,7 +4134,7 @@ VkRoot::AcquireNextSwapchainImageResult VkRoot::acquireNextSwapchainImage()
 		}
 		return AcquireNextSwapchainImageResult::eUnhandledFailure;
 	}
-	catch (vk::SurfaceLostKHRError&)
+	catch (const vk::SurfaceLostKHRError&)
 	{
 		debug(LOG_3D, "vk::Device::acquireNextImageKHR: ErrorSurfaceLostKHR - must recreate surface + swapchain");
 		// recreate surface + swapchain
@@ -3903,7 +4144,7 @@ VkRoot::AcquireNextSwapchainImageResult VkRoot::acquireNextSwapchainImage()
 		}
 		return AcquireNextSwapchainImageResult::eUnhandledFailure;
 	}
-	catch (vk::SystemError& e)
+	catch (const vk::SystemError& e)
 	{
 		debug(LOG_ERROR, "vk::Device::acquireNextImageKHR: unhandled error: %s", e.what());
 		return AcquireNextSwapchainImageResult::eUnhandledFailure;
@@ -4006,7 +4247,30 @@ void VkRoot::endRenderPass()
 			.setPWaitSemaphores(&buffering_mechanism::get_current_swapchain_resources().renderFinishedSemaphore);
 	}
 
-	graphicsQueue.submit(submitInfo, buffering_mechanism::get_current_resources().previousSubmission, vkDynLoader);
+	try {
+		graphicsQueue.submit(submitInfo, buffering_mechanism::get_current_resources().previousSubmission, vkDynLoader);
+	}
+	catch (const vk::OutOfHostMemoryError& e)
+	{
+		debug(LOG_ERROR, "vk::Queue::submit: OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e)
+	{
+		debug(LOG_ERROR, "vk::Queue::submit: OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
+	catch (const vk::DeviceLostError& e)
+	{
+		debug(LOG_ERROR, "vk::Queue::submit: DeviceLostError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorDeviceLost);
+	}
+	catch (const vk::SystemError& e)
+	{
+		debug(LOG_FATAL, "vk::Queue::submit: unhandled error: %s", e.what());
+		auto resultErr = static_cast<vk::Result>(e.code().value());
+		handleUnrecoverableError(resultErr);
+	}
 
 	if (mustRecreateSwapchain)
 	{
@@ -4020,20 +4284,20 @@ void VkRoot::endRenderPass()
 		try {
 			presentResult = presentQueue.presentKHR(presentInfo, vkDynLoader);
 		}
-		catch (vk::OutOfDateKHRError&)
+		catch (const vk::OutOfDateKHRError&)
 		{
 			debug(LOG_3D, "vk::Queue::presentKHR: ErrorOutOfDateKHR - must recreate swapchain");
 			createNewSwapchainAndSwapchainSpecificStuff(vk::Result::eErrorOutOfDateKHR);
 			return; // end processing this flip
 		}
-		catch (vk::SurfaceLostKHRError&)
+		catch (const vk::SurfaceLostKHRError&)
 		{
 			debug(LOG_3D, "vk::Queue::presentKHR: ErrorSurfaceLostKHR - must recreate surface + swapchain");
 			// recreate surface + swapchain
 			handleSurfaceLost();
 			return; // end processing this flip
 		}
-		catch (vk::SystemError& e)
+		catch (const vk::SystemError& e)
 		{
 			debug(LOG_FATAL, "vk::Queue::presentKHR: unhandled error: %s", e.what());
 			presentResult = vk::Result::eErrorUnknown;
@@ -4044,7 +4308,30 @@ void VkRoot::endRenderPass()
 		}
 	}
 
-	buffering_mechanism::swap(dev, vkDynLoader, mustSkipDrawing); // must be called *before* acquireNextSwapchainImage()
+	try {
+		buffering_mechanism::swap(dev, vkDynLoader, mustSkipDrawing); // must be called *before* acquireNextSwapchainImage()
+	}
+	catch (const vk::OutOfHostMemoryError& e)
+	{
+		debug(LOG_ERROR, "buffering swap: OutOfHostMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfHostMemory);
+	}
+	catch (const vk::OutOfDeviceMemoryError& e)
+	{
+		debug(LOG_ERROR, "buffering swap: OutOfDeviceMemoryError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorOutOfDeviceMemory);
+	}
+	catch (const vk::DeviceLostError& e)
+	{
+		debug(LOG_ERROR, "buffering swap: DeviceLostError: %s", e.what());
+		handleUnrecoverableError(vk::Result::eErrorDeviceLost);
+	}
+	catch (const vk::SystemError& e)
+	{
+		debug(LOG_FATAL, "buffering swap: unhandled error: %s", e.what());
+		auto resultErr = static_cast<vk::Result>(e.code().value());
+		handleUnrecoverableError(resultErr);
+	}
 
 	if (!mustSkipDrawing)
 	{
@@ -4139,6 +4426,10 @@ int32_t VkRoot::get_context_value(const gfx_api::context::context_value property
 			return static_cast<std::underlying_type<vk::SampleCountFlagBits>::type>(getMaxUsableSampleCount(physDeviceProps));
 		case gfx_api::context::context_value::MAX_ARRAY_TEXTURE_LAYERS:
 			return physDeviceProps.limits.maxImageArrayLayers;
+		case gfx_api::context::context_value::MAX_VERTEX_ATTRIBS:
+			return physDeviceProps.limits.maxVertexInputAttributes;
+		case gfx_api::context::context_value::MAX_VERTEX_OUTPUT_COMPONENTS:
+			return std::min(physDeviceProps.limits.maxVertexOutputComponents, physDeviceProps.limits.maxFragmentInputComponents);
 	}
 	debug(LOG_FATAL, "Unsupported property");
 	return 0;
@@ -4244,6 +4535,11 @@ const size_t& VkRoot::current_FrameNum() const
 bool VkRoot::supportsMipLodBias() const
 {
 	return lodBiasMethod != LodBiasMethod::Unsupported;
+}
+
+size_t VkRoot::maxFramesInFlight() const
+{
+	return MAX_FRAMES_IN_FLIGHT;
 }
 
 #endif // defined(WZ_VULKAN_ENABLED)

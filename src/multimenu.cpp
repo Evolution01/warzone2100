@@ -845,7 +845,7 @@ private:
 	{
 		auto nameGrid = std::make_shared<GridLayout>();
 		char name[128];
-		ssprintf(name, "%d: %s", NetPlay.players[player].position, getPlayerName(player, true));
+		ssprintf(name, "%d: %s", NetPlay.players[player].position, getPlayerName(player));
 		nameGrid->place({0, 1, false}, {0}, std::make_shared<MultiMenuDroidView>(player));
 		auto nameLabel = makeLabel(name);
 		nameGrid->place({1}, {0}, nameLabel);
@@ -1337,7 +1337,7 @@ void intProcessMultiMenu(UDWORD id)
 				sendInGameSystemMessage(buf);
 				ssprintf(buf, _("kicked %s : %s from the game, and added them to the banned list!"), getPlayerName((unsigned int) i), NetPlay.players[i].IPtextAddress);
 				NETlogEntry(buf, SYNC_FLAG, (unsigned int) i);
-				kickPlayer((unsigned int) i, _("The host has kicked you from the game."), ERROR_KICKED);
+				kickPlayer((unsigned int) i, _("The host has kicked you from the game."), ERROR_KICKED, false);
 				return;
 			}
 		}

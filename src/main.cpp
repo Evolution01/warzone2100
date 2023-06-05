@@ -121,9 +121,8 @@
 #endif
 
 #if defined(WZ_OS_MAC)
-// NOTE: Moving these defines is likely to (and has in the past) break the mac builds
-# include <CoreServices/CoreServices.h>
 # include <unistd.h>
+# include "lib/framework/mac_wrapper.h"
 # include "lib/framework/cocoa_wrapper.h"
 #endif // WZ_OS_MAC
 
@@ -738,7 +737,6 @@ static void check_Physfs()
 	}
 }
 
-
 /*!
  * \brief Adds default data dirs
  *
@@ -754,11 +752,6 @@ static void check_Physfs()
  */
 static void scanDataDirs()
 {
-#if defined(WZ_OS_MAC)
-	// version-independent location for video files
-	registerSearchPath("/Library/Application Support/Warzone 2100/", 1);
-#endif
-
 #if !defined(WZ_OS_MAC)
 	// Check PREFIX-based paths
 	std::string tmpstr;
@@ -771,49 +764,33 @@ static void scanDataDirs()
 	{
 		// Data in source tree (<prefix>/data/)
 		tmpstr = prefix + dirSeparator + "data" + dirSeparator;
-		registerSearchPath(tmpstr.c_str(), 3);
+		registerSearchPath(tmpstr, 3);
 		rebuildSearchPath(mod_multiplay, true);
 
 		if (!PHYSFS_exists("gamedesc.lev"))
 		{
-			// Program dir
-			registerSearchPath(PHYSFS_getBaseDir(), 4);
-			rebuildSearchPath(mod_multiplay, true);
+			// Guessed fallback default datadir on Unix
+			std::string wzDataDir = WZ_DATADIR;
+			if(!wzDataDir.empty())
+			{
+			#ifndef WZ_DATADIR_ISABSOLUTE
+				// Treat WZ_DATADIR as a relative path - append to the install PREFIX
+				tmpstr = prefix + dirSeparator + wzDataDir;
+				registerSearchPath(tmpstr, 4);
+				rebuildSearchPath(mod_multiplay, true);
+			#else
+				// Treat WZ_DATADIR as an absolute path, and use directly
+				registerSearchPath(wzDataDir, 4);
+				rebuildSearchPath(mod_multiplay, true);
+			#endif
+			}
 
 			if (!PHYSFS_exists("gamedesc.lev"))
 			{
-				// Guessed fallback default datadir on Unix
-				std::string wzDataDir = WZ_DATADIR;
-				if(!wzDataDir.empty())
-				{
-				#ifndef WZ_DATADIR_ISABSOLUTE
-					// Treat WZ_DATADIR as a relative path - append to the install PREFIX
-					tmpstr = prefix + dirSeparator + wzDataDir;
-					registerSearchPath(tmpstr.c_str(), 5);
-					rebuildSearchPath(mod_multiplay, true);
-				#else
-					// Treat WZ_DATADIR as an absolute path, and use directly
-					registerSearchPath(wzDataDir.c_str(), 5);
-					rebuildSearchPath(mod_multiplay, true);
-				#endif
-				}
-
-				if (!PHYSFS_exists("gamedesc.lev"))
-				{
-					// Relocation for AutoPackage (<prefix>/share/warzone2100/)
-					tmpstr = prefix + dirSeparator + "share" + dirSeparator + "warzone2100" + dirSeparator;
-					registerSearchPath(tmpstr.c_str(), 6);
-					rebuildSearchPath(mod_multiplay, true);
-
-					if (!PHYSFS_exists("gamedesc.lev"))
-					{
-						// Guessed fallback default datadir on Unix
-						// TEMPORARY: Fallback to ensure old WZ_DATADIR behavior as a last-resort
-						//			  This is only present for the benefit of the automake build toolchain.
-						registerSearchPath(WZ_DATADIR, 7);
-						rebuildSearchPath(mod_multiplay, true);
-					}
-				}
+				// Relocation for AutoPackage (<prefix>/share/warzone2100/)
+				tmpstr = prefix + dirSeparator + "share" + dirSeparator + "warzone2100" + dirSeparator;
+				registerSearchPath(tmpstr, 5);
+				rebuildSearchPath(mod_multiplay, true);
 			}
 		}
 	}
@@ -822,25 +799,17 @@ static void scanDataDirs()
 #ifdef WZ_OS_MAC
 	if (!PHYSFS_exists("gamedesc.lev"))
 	{
-		CFURLRef resourceURL = CFBundleCopyResourcesDirectoryURL(CFBundleGetMainBundle());
-		char resourcePath[PATH_MAX];
-		if (CFURLGetFileSystemRepresentation(resourceURL, true,
-		                                     (UInt8 *) resourcePath,
-		                                     PATH_MAX))
+		auto resourceDataPathResult = wzMacAppBundleGetResourceDirectoryPath();
+		if (resourceDataPathResult.has_value())
 		{
-			WzString resourceDataPath(resourcePath);
+			WzString resourceDataPath(resourceDataPathResult.value());
 			resourceDataPath += "/data";
-			registerSearchPath(resourceDataPath.toUtf8().c_str(), 3);
+			registerSearchPath(resourceDataPath.toUtf8(), 3);
 			rebuildSearchPath(mod_multiplay, true);
 		}
 		else
 		{
-			debug(LOG_ERROR, "Could not change to resources directory.");
-		}
-
-		if (resourceURL != NULL)
-		{
-			CFRelease(resourceURL);
+			debug(LOG_FATAL, "Could not obtain resources directory.");
 		}
 	}
 #endif
@@ -852,7 +821,15 @@ static void scanDataDirs()
 	}
 
 	// User's home dir
-	registerSearchPath(PHYSFS_getWriteDir(), 2);
+	const char *pCurrWriteDir = PHYSFS_getWriteDir();
+	if (pCurrWriteDir)
+	{
+		registerSearchPath(pCurrWriteDir, 2);
+	}
+	else
+	{
+		debug(LOG_FATAL, "No write dir set?");
+	}
 	rebuildSearchPath(mod_multiplay, true);
 
 	/** Debugging and sanity checks **/
@@ -904,17 +881,23 @@ static void make_dir(char *dest, const char *dirname, const char *subdir)
  * Preparations before entering the title (mainmenu) loop
  * Would start the timer in an event based mainloop
  */
-static void startTitleLoop()
+static void startTitleLoop(bool onInitialStartup = false)
 {
 	SetGameMode(GS_TITLE_SCREEN);
 
-	initLoadingScreen(true);
+	if (!onInitialStartup)
+	{
+		initLoadingScreen(true);
+	}
 	if (!frontendInitialise("wrf/frontend.wrf"))
 	{
 		debug(LOG_FATAL, "Shutting down after failure");
 		exit(EXIT_FAILURE);
 	}
-	closeLoadingScreen();
+	if (!onInitialStartup)
+	{
+		closeLoadingScreen();
+	}
 }
 
 
@@ -1011,9 +994,9 @@ static void startGameLoop()
 			// should not happen
 			break;
 		case ActivitySink::GameMode::CAMPAIGN:
-		case ActivitySink::GameMode::CHALLENGE:
 			// replays not currently supported
 			break;
+		case ActivitySink::GameMode::CHALLENGE:
 		case ActivitySink::GameMode::SKIRMISH:
 		case ActivitySink::GameMode::MULTIPLAYER:
 		{
@@ -2137,7 +2120,7 @@ int realmain(int argc, char *argv[])
 	switch (GetGameMode())
 	{
 	case GS_TITLE_SCREEN:
-		startTitleLoop();
+		startTitleLoop(true);
 		break;
 	case GS_SAVEGAMELOAD:
 		if (headlessGameMode())

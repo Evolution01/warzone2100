@@ -32,6 +32,7 @@
 #include "lib/ivis_opengl/screen.h"
 #include "lib/exceptionhandler/dumpinfo.h"
 #include "lib/gamelib/gtime.h"
+#include "src/configuration.h"
 #include "src/warzoneconfig.h"
 #include "src/game.h"
 #include "gfx_api_sdl.h"
@@ -653,7 +654,8 @@ WINDOW_MODE wzGetToggleFullscreenMode()
 
 bool wzChangeWindowMode(WINDOW_MODE mode)
 {
-	if (wzGetCurrentWindowMode() == mode)
+	auto currMode = wzGetCurrentWindowMode();
+	if (currMode == mode)
 	{
 		// already in this mode
 		return true;
@@ -664,6 +666,8 @@ bool wzChangeWindowMode(WINDOW_MODE mode)
 		// not a supported mode on this system
 		return false;
 	}
+
+	debug(LOG_INFO, "Changing window mode: %s -> %s", to_display_string(currMode).c_str(), to_display_string(mode).c_str());
 
 	int sdl_result = -1;
 	switch (mode)
@@ -687,7 +691,12 @@ bool wzChangeWindowMode(WINDOW_MODE mode)
 			// Determine the maximum usable windowed size for this display/screen, and cap the desired window size at that
 			int desiredWidth = war_GetWidth(), desiredHeight = war_GetHeight();
 			SDL_Rect displayUsableBounds = { 0, 0, 0, 0 };
+#if defined(WZ_OS_MAC)
+			// SDL currently triggers an internal assert when calling SDL_GetDisplayUsableBounds here on macOS - so use SDL_GetDisplayBounds for now
+			if (SDL_GetDisplayBounds(currDisplayIndex, &displayUsableBounds) == 0)
+#else
 			if (SDL_GetDisplayUsableBounds(currDisplayIndex, &displayUsableBounds) == 0)
+#endif
 			{
 				if (displayUsableBounds.w > 0 && displayUsableBounds.h > 0)
 				{
@@ -1995,6 +2004,24 @@ bool wzChangeDisplayScale(unsigned int displayScale)
 	return true;
 }
 
+bool wzChangeCursorScale(unsigned int cursorScale)
+{
+	if (WZwindow == nullptr)
+	{
+		debug(LOG_WARNING, "wzChangeCursorScale called when window is not available");
+		return false;
+	}
+
+	if (cursorScale == war_getCursorScale())
+	{
+		return true;
+	}
+
+	war_setCursorScale(cursorScale); // must be set before cursors are reinit
+	wzSDLReinitCursors();
+	return true;
+}
+
 bool wzReduceDisplayScalingIfNeeded(int currWidth, int currHeight)
 {
 	// Check whether the desired window size is smaller than the minimum required for the current Display Scale
@@ -2028,7 +2055,7 @@ bool wzChangeFullscreenDisplayMode(int screen, unsigned int width, unsigned int 
 		debug(LOG_WARNING, "wzChangeFullscreenDisplayMode called when window is not available");
 		return false;
 	}
-	debug(LOG_WZ, "Attempt to change fullscreen mode to [%d] %dx%d", screen, width, height);
+	debug(LOG_INFO, "Changing fullscreen mode to [%d] %dx%d", screen, width, height);
 
 	bool hasPrior = true;
 	int priorScreen = SDL_GetWindowDisplayIndex(WZwindow);
@@ -2336,7 +2363,7 @@ static SDL_WindowFlags SDL_backend(const video_backend& backend)
 	return SDL_WindowFlags{};
 }
 
-bool shouldResetGfxBackendPrompt(video_backend currentBackend, video_backend newBackend, std::string failedToInitializeObject = "graphics", std::string additionalErrorDetails = "")
+bool shouldResetGfxBackendPrompt_internal(video_backend currentBackend, video_backend newBackend, std::string failureVerb = "initialize", std::string failedToInitializeObject = "graphics", std::string additionalErrorDetails = "")
 {
 	// Offer to reset to the specified gfx backend
 	std::string resetString = std::string("Reset to ") + to_display_string(newBackend) + "";
@@ -2344,8 +2371,8 @@ bool shouldResetGfxBackendPrompt(video_backend currentBackend, video_backend new
 	   { SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, resetString.c_str() },
 	   { SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 2, "Not Now" },
 	};
-	std::string titleString = std::string("Warzone: Failed to initialize ") + failedToInitializeObject;
-	std::string messageString = std::string("Failed to initialize ") + failedToInitializeObject + " for backend: " + to_display_string(currentBackend) + ".\n\n";
+	std::string titleString = std::string("Warzone: Failed to ") + failureVerb + " " + failedToInitializeObject;
+	std::string messageString = std::string("Failed to ") + failureVerb + " " + failedToInitializeObject + " for backend: " + to_display_string(currentBackend) + ".\n\n";
 	if (!additionalErrorDetails.empty())
 	{
 		messageString += "Error Details: \n\"" + additionalErrorDetails + "\"\n\n";
@@ -2373,6 +2400,11 @@ bool shouldResetGfxBackendPrompt(video_backend currentBackend, video_backend new
 	return false;
 }
 
+bool shouldResetGfxBackendPrompt(video_backend currentBackend, video_backend newBackend, std::string failedToInitializeObject = "graphics", std::string additionalErrorDetails = "")
+{
+	return shouldResetGfxBackendPrompt_internal(currentBackend, newBackend, "initialize", failedToInitializeObject, additionalErrorDetails);
+}
+
 void resetGfxBackend(video_backend newBackend, bool displayRestartMessage = true)
 {
 	war_setGfxBackend(newBackend);
@@ -2381,6 +2413,38 @@ void resetGfxBackend(video_backend newBackend, bool displayRestartMessage = true
 		std::string title = std::string("Backend reset to: ") + to_display_string(newBackend);
 		wzDisplayDialog(Dialog_Information, title.c_str(), "(Note: Do not specify a --gfxbackend option, or it will override this new setting.)\n\nPlease restart Warzone 2100 to use the new graphics setting.");
 	}
+}
+
+bool wzPromptToChangeGfxBackendOnFailure(std::string additionalErrorDetails /*= ""*/)
+{
+	if (!WZbackend.has_value())
+	{
+		ASSERT(false, "Can't reset gfx backend when there is no gfx backend.");
+		return false;
+	}
+	video_backend defaultBackend = wzGetNextFallbackGfxBackendForCurrentSystem(WZbackend.value());
+	if (WZbackend.value() != defaultBackend)
+	{
+		if (shouldResetGfxBackendPrompt_internal(WZbackend.value(), defaultBackend, "draw", "graphics", additionalErrorDetails))
+		{
+			resetGfxBackend(defaultBackend);
+			saveGfxConfig(); // must force-persist the new value before returning!
+			return true;
+		}
+	}
+	else
+	{
+		// Display message that there was a failure with the gfx backend (but there's no other backend to offer changing it to?)
+		std::string title = std::string("Graphics Error: ") + to_display_string(WZbackend.value());
+		std::string messageString = std::string("An error occured with graphics backend: ") + to_display_string(WZbackend.value()) + ".\n\n";
+		if (!additionalErrorDetails.empty())
+		{
+			messageString += "Error Details: \n\"" + additionalErrorDetails + "\"\n\n";
+		}
+		messageString += "Warzone 2100 will now close.";
+		wzDisplayDialog(Dialog_Error, title.c_str(), messageString.c_str());
+	}
+	return false;
 }
 
 bool wzSDLOneTimeInit()
@@ -2970,6 +3034,36 @@ bool wzMainScreenSetup(optional<video_backend> backend, int antialiasing, WINDOW
 
 	WZbackend = backend;
 
+#if defined(WZ_OS_WIN)
+	// Windows: Workaround for Nvidia "threaded optimization"
+	// Set the process affinity mask to 1 before creating the window and initializing OpenGL
+	// This disables Nvidia's "threaded optimization" feature, which can cause issues with WZ in OpenGL mode
+	// NOTE: Must restore the affinity mask afterwards! (See below)
+	DWORD_PTR originalProcessAffinityMask = 0;
+	DWORD_PTR systemAffinityMask = 0;
+	bool restoreAffinityMask = false;
+
+	if (backend.has_value() && (backend.value() == video_backend::opengl)) // only do this for OpenGL mode, for now
+	{
+		if (::GetProcessAffinityMask(::GetCurrentProcess(), &originalProcessAffinityMask, &systemAffinityMask) != 0)
+		{
+			if (::SetProcessAffinityMask(::GetCurrentProcess(), 1) != 0)
+			{
+				restoreAffinityMask = true;
+			}
+			else
+			{
+				debug(LOG_INFO, "Failed to set process affinity mask");
+			}
+		}
+		else
+		{
+			// Failed to get the current process affinity mask
+			debug(LOG_INFO, "Failed to get current process affinity mask");
+		}
+	}
+#endif
+
 	SDL_gfx_api_Impl_Factory::Configuration sdl_impl_config;
 
 	if (backend.has_value())
@@ -3051,6 +3145,21 @@ bool wzMainScreenSetup(optional<video_backend> backend, int antialiasing, WINDOW
 	{
 		wzMainScreenSetup_VerifyWindow();
 	}
+
+#if defined(WZ_OS_WIN)
+	if (restoreAffinityMask)
+	{
+		// restore process affinity mask
+		if (::SetProcessAffinityMask(::GetCurrentProcess(), originalProcessAffinityMask) != 0)
+		{
+			debug(LOG_WZ, "Restored process affinity mask");
+		}
+		else
+		{
+			debug(LOG_ERROR, "Failed to restore process affinity mask");
+		}
+	}
+#endif
 
 	return true;
 }
@@ -3270,13 +3379,13 @@ static void handleActiveEvent(SDL_Event *event)
 			}
 			break;
 		case SDL_WINDOWEVENT_MINIMIZED:
-			debug(LOG_WZ, "Window %d minimized", event->window.windowID);
+			debug(LOG_INFO, "Window %d minimized", event->window.windowID);
 			break;
 		case SDL_WINDOWEVENT_MAXIMIZED:
 			debug(LOG_WZ, "Window %d maximized", event->window.windowID);
 			break;
 		case SDL_WINDOWEVENT_RESTORED:
-			debug(LOG_WZ, "Window %d restored", event->window.windowID);
+			debug(LOG_INFO, "Window %d restored", event->window.windowID);
 			{
 				unsigned int oldWindowWidth = windowWidth;
 				unsigned int oldWindowHeight = windowHeight;
@@ -3448,4 +3557,12 @@ bool wzBackendAttemptOpenURL(const char *url)
 #endif
 	// SDL_OpenURL requires SDL >= 2.0.14
 	return false;
+}
+
+// Gets the system RAM in MiB
+uint64_t wzGetCurrentSystemRAM()
+{
+	int value = SDL_GetSystemRAM();
+	if (value <= 0) { return 0; }
+	return static_cast<uint64_t>(value);
 }

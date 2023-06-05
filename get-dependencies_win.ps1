@@ -5,7 +5,7 @@ param([string]$VCPKG_BUILD_TYPE = "")
 ############################
 
 # To ensure reproducible builds, pin to a specific vcpkg commit
-$VCPKG_COMMIT_SHA = "fe5757109de431c2be980144867b26f96aaf422e";
+$VCPKG_COMMIT_SHA = "7f59e0013648f0dd80377330b770b414032233cb";
 
 # WZ Windows features (for vcpkg install)
 $VCPKG_INSTALL_FEATURES = @()
@@ -106,6 +106,9 @@ If (($triplet.Contains("mingw")) -or (-not ([string]::IsNullOrEmpty($VCPKG_BUILD
 	{
 		# A fix for libtool issues with mingw-clang
 		Add-Content -Path $overlayTripletFile -Value "`r`nlist(APPEND VCPKG_CONFIGURE_MAKE_OPTIONS `"lt_cv_deplibs_check_method=pass_all`")";
+
+		# Build with pdb debug symbols (mingw-clang)
+		Add-Content -Path $overlayTripletFile -Value "`r`nstring(APPEND VCPKG_CXX_FLAGS `" -gcodeview -g `")`r`nstring(APPEND VCPKG_C_FLAGS `" -gcodeview -g `")`r`nstring(APPEND VCPKG_LINKER_FLAGS `" -Wl,-pdb= `")";
 	}
 	If (-not ([string]::IsNullOrEmpty($VCPKG_BUILD_TYPE)))
 	{
@@ -114,6 +117,11 @@ If (($triplet.Contains("mingw")) -or (-not ([string]::IsNullOrEmpty($VCPKG_BUILD
 	# Setup environment variable so vcpkg uses the overlay triplets folder
 	$env:VCPKG_OVERLAY_TRIPLETS = "$tripletOverlayFolder"
 }
+
+# Patch vcpkg_copy_pdbs for mingw support
+$vcpkg_copy_pdbs_patch = (Join-Path "$($ScriptRoot)" ".ci\vcpkg\patches\scripts\cmake\vcpkg_copy_pdbs.cmake");
+$vcpkg_copy_pdbs_dest = (Join-Path (pwd) "scripts\cmake");
+Copy-Item "$vcpkg_copy_pdbs_patch" -Destination "$vcpkg_copy_pdbs_dest"
 
 popd;
 

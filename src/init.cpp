@@ -111,7 +111,8 @@ char fileLoadBuffer[FILE_LOAD_BUFFER_SIZE];
 
 IMAGEFILE *FrontImages;
 
-static wzSearchPath *searchPathRegistry = nullptr;
+static std::vector<std::unique_ptr<wzSearchPath>> searchPathRegistry;
+static std::vector<std::string> searchPathMountErrors;
 
 static std::string inMemoryMapVirtualFilenameUID;
 static std::vector<uint8_t> inMemoryMapArchiveData;
@@ -257,21 +258,7 @@ bool loadLevFile_JSON(const std::string& mountPoint, const std::string& filename
 
 static void cleanSearchPath()
 {
-	wzSearchPath *curSearchPath = searchPathRegistry, * tmpSearchPath = nullptr;
-
-	// Start at the lowest priority
-	while (curSearchPath->lowerPriority)
-	{
-		curSearchPath = curSearchPath->lowerPriority;
-	}
-
-	while (curSearchPath)
-	{
-		tmpSearchPath = curSearchPath->higherPriority;
-		free(curSearchPath);
-		curSearchPath = tmpSearchPath;
-	}
-	searchPathRegistry = nullptr;
+	searchPathRegistry.clear();
 }
 
 
@@ -279,54 +266,39 @@ static void cleanSearchPath()
  * Register searchPath above the path with next lower priority
  * For information about what can be a search path, refer to PhysFS documentation
  */
-void registerSearchPath(const char path[], unsigned int priority)
+void registerSearchPath(const std::string& newPath, unsigned int priority)
 {
-	wzSearchPath *curSearchPath = searchPathRegistry, * tmpSearchPath = nullptr;
-
-	tmpSearchPath = (wzSearchPath *)malloc(sizeof(*tmpSearchPath));
-	sstrcpy(tmpSearchPath->path, path);
-	if (path[strlen(path) - 1] != *PHYSFS_getDirSeparator())
+	ASSERT_OR_RETURN(, !newPath.empty(), "Calling registerSearchPath with empty path, priority %u", priority);
+	std::unique_ptr<wzSearchPath> tmpSearchPath = std::unique_ptr<wzSearchPath>(new wzSearchPath());
+	tmpSearchPath->path = newPath;
+	if (!strEndsWith(tmpSearchPath->path, PHYSFS_getDirSeparator()))
 	{
-		sstrcat(tmpSearchPath->path, PHYSFS_getDirSeparator());
+		tmpSearchPath->path += PHYSFS_getDirSeparator();
 	}
 	tmpSearchPath->priority = priority;
 
-	debug(LOG_WZ, "registerSearchPath: Registering %s at priority %i", path, priority);
-	if (!curSearchPath)
-	{
-		searchPathRegistry = tmpSearchPath;
-		searchPathRegistry->lowerPriority = nullptr;
-		searchPathRegistry->higherPriority = nullptr;
-		return;
-	}
+	debug(LOG_WZ, "registerSearchPath: Registering %s at priority %i", newPath.c_str(), priority);
 
-	while (curSearchPath->higherPriority && priority > curSearchPath->priority)
-	{
-		curSearchPath = curSearchPath->higherPriority;
-	}
-	while (curSearchPath->lowerPriority && priority < curSearchPath->priority)
-	{
-		curSearchPath = curSearchPath->lowerPriority;
-	}
+	// insert in sorted order
+	auto insert_pos = std::upper_bound(searchPathRegistry.begin(), searchPathRegistry.end(), tmpSearchPath, [](const std::unique_ptr<wzSearchPath>& a, const std::unique_ptr<wzSearchPath>& b) {
+		return a->priority < b->priority;
+	});
+	searchPathRegistry.insert(insert_pos, std::move(tmpSearchPath));
+}
 
-	if (priority < curSearchPath->priority)
+void unregisterSearchPath(const std::string& path)
+{
+	for (auto it = searchPathRegistry.begin(); it != searchPathRegistry.end(); )
 	{
-		tmpSearchPath->lowerPriority = curSearchPath->lowerPriority;
-		tmpSearchPath->higherPriority = curSearchPath;
-	}
-	else
-	{
-		tmpSearchPath->lowerPriority = curSearchPath;
-		tmpSearchPath->higherPriority = curSearchPath->higherPriority;
-	}
+		const auto& curSearchPath = *it;
+		if (curSearchPath && (curSearchPath->path.compare(path) == 0))
+		{
+			// ignore this notification - remove from the list
+			it = searchPathRegistry.erase(it);
+			continue;
+		}
 
-	if (tmpSearchPath->lowerPriority)
-	{
-		tmpSearchPath->lowerPriority->higherPriority = tmpSearchPath;
-	}
-	if (tmpSearchPath->higherPriority)
-	{
-		tmpSearchPath->higherPriority->lowerPriority = tmpSearchPath;
+		++it;
 	}
 }
 
@@ -344,6 +316,38 @@ std::list<std::string> getPhysFSSearchPathsAsStr()
 	}
 	PHYSFS_freeList(list);
 	return results;
+}
+
+void debugOutputSearchPaths()
+{
+	debug(LOG_INFO, "Search path registry:");
+	size_t idx = 0;
+	for (const auto& curSearchPath : searchPathRegistry)
+	{
+		debug(LOG_INFO, "- [%zu] [priority: %u]: %s", idx, curSearchPath->priority, curSearchPath->path.c_str());
+		++idx;
+	}
+	debug(LOG_INFO, "Enumerated search paths:");
+	auto searchPaths = getPhysFSSearchPathsAsStr();
+	idx = 0;
+	for (const auto& curSearchPath : searchPaths)
+	{
+		debug(LOG_INFO, "- [%zu]: %s", idx,  curSearchPath.c_str());
+		++idx;
+	}
+}
+
+void debugOutputSearchPathMountErrors()
+{
+	if (searchPathMountErrors.empty())
+	{
+		return;
+	}
+	debug(LOG_INFO, "Search path mount errors:");
+	for (const auto& errorStr : searchPathMountErrors)
+	{
+		debug(LOG_INFO, "%s", errorStr.c_str());
+	}
 }
 
 static void clearAllPhysFSSearchPaths()
@@ -401,6 +405,27 @@ static void clearInMemoryMapFile(void *pData)
 	}
 }
 
+static bool WZ_PHYSFS_MountSearchPathWrapper(const char *newDir, const char *mountPoint, int appendToPath)
+{
+	if (PHYSFS_mount(newDir, mountPoint, appendToPath) != 0)
+	{
+		return true;
+	}
+	else
+	{
+		// mount failed
+#if defined(WZ_PHYSFS_2_1_OR_GREATER)
+		auto errorCode = PHYSFS_getLastErrorCode();
+		if (errorCode != PHYSFS_ERR_NOT_FOUND)
+		{
+			const char* errorStr = PHYSFS_getErrorByCode(errorCode);
+			searchPathMountErrors.push_back(astringf("Failed to mount \"%s\" @ \"%s\": %s", newDir, mountPoint, (errorStr) ? errorStr : "<no details available?>"));
+		}
+#endif
+		return false;
+	}
+}
+
 /*!
  * \brief Rebuilds the PHYSFS searchPath with mode specific subdirs
  *
@@ -411,8 +436,7 @@ bool rebuildSearchPath(searchPathMode mode, bool force, const char *current_map,
 {
 	static searchPathMode current_mode = mod_clean;
 	static std::string current_current_map;
-	wzSearchPath *curSearchPath = searchPathRegistry;
-	char tmpstr[PATH_MAX] = "\0";
+	std::string tmpstr;
 
 	if (mode != current_mode || (current_map != nullptr ? current_map : "") != current_current_map || force ||
 	    (use_override_mods && override_mod_list != getModList()))
@@ -425,121 +449,98 @@ bool rebuildSearchPath(searchPathMode mode, bool force, const char *current_map,
 		current_mode = mode;
 		current_current_map = current_map != nullptr ? current_map : "";
 
-		// Start at the lowest priority
-		while (curSearchPath->lowerPriority)
-		{
-			curSearchPath = curSearchPath->lowerPriority;
-		}
-
 		switch (mode)
 		{
 		case mod_clean:
 			debug(LOG_WZ, "Cleaning up");
 			clearLoadedMods();
 
-			while (curSearchPath)
+			for (const auto& curSearchPath : searchPathRegistry)
 			{
 #ifdef DEBUG
-				debug(LOG_WZ, "Removing [%s] from search path", curSearchPath->path);
+				debug(LOG_WZ, "Removing [%s] from search path", curSearchPath->path.c_str());
 #endif // DEBUG
 				// Remove maps and mods
-				removeSubdirs(curSearchPath->path, "maps");
-				removeSubdirs(curSearchPath->path, versionedModsPath(MODS_MUSIC));
-				removeSubdirs(curSearchPath->path, versionedModsPath(MODS_GLOBAL));
-				removeSubdirs(curSearchPath->path, versionedModsPath(MODS_AUTOLOAD));
-				removeSubdirs(curSearchPath->path, versionedModsPath(MODS_CAMPAIGN));
-				removeSubdirs(curSearchPath->path, versionedModsPath(MODS_MULTIPLAY));
-				removeSubdirs(curSearchPath->path, "mods/downloads"); // not versioned
+				removeSubdirs(curSearchPath->path.c_str(), "maps");
+				removeSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_MUSIC));
+				removeSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_GLOBAL));
+				removeSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_AUTOLOAD));
+				removeSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_CAMPAIGN));
+				removeSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_MULTIPLAY));
+				removeSubdirs(curSearchPath->path.c_str(), "mods/downloads"); // not versioned
 
 				// Remove multiplay patches
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "mp");
-				WZ_PHYSFS_unmount(tmpstr);
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "mp.wz");
-				WZ_PHYSFS_unmount(tmpstr);
+				tmpstr = curSearchPath->path + "mp";
+				WZ_PHYSFS_unmount(tmpstr.c_str());
+				tmpstr = curSearchPath->path + "mp.wz";
+				WZ_PHYSFS_unmount(tmpstr.c_str());
 
 				// Remove plain dir
-				WZ_PHYSFS_unmount(curSearchPath->path);
+				WZ_PHYSFS_unmount(curSearchPath->path.c_str());
 
 				// Remove base files
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "base");
-				WZ_PHYSFS_unmount(tmpstr);
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "base.wz");
-				WZ_PHYSFS_unmount(tmpstr);
+				tmpstr = curSearchPath->path + "base";
+				WZ_PHYSFS_unmount(tmpstr.c_str());
+				tmpstr = curSearchPath->path + "base.wz";
+				WZ_PHYSFS_unmount(tmpstr.c_str());
 
 				// remove video search path as well
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "sequences.wz");
-				WZ_PHYSFS_unmount(tmpstr);
-				curSearchPath = curSearchPath->higherPriority;
+				tmpstr = curSearchPath->path + "sequences.wz";
+				WZ_PHYSFS_unmount(tmpstr.c_str());
 			}
 
 			// This should properly remove all paths, but testing is needed to ensure that all supported versions of PhysFS behave as expected
 			// For now, keep the old code above as well as this new method
 			clearAllPhysFSSearchPaths();
+			searchPathMountErrors.clear();
 			break;
 		case mod_campaign:
 			debug(LOG_WZ, "*** Switching to campaign mods ***");
 			clearLoadedMods();
 
-			while (curSearchPath)
+			for (const auto& curSearchPath : searchPathRegistry)
 			{
 				// make sure videos override included files
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "sequences.wz");
-				PHYSFS_mount(tmpstr, NULL, PHYSFS_APPEND);
-				curSearchPath = curSearchPath->higherPriority;
+				tmpstr = curSearchPath->path + "sequences.wz";
+				WZ_PHYSFS_MountSearchPathWrapper(tmpstr.c_str(), NULL, PHYSFS_APPEND);
 			}
-			curSearchPath = searchPathRegistry;
-			while (curSearchPath->lowerPriority)
-			{
-				curSearchPath = curSearchPath->lowerPriority;
-			}
-			while (curSearchPath)
+
+			for (const auto& curSearchPath : searchPathRegistry)
 			{
 #ifdef DEBUG
-				debug(LOG_WZ, "Adding [%s] to search path", curSearchPath->path);
+				debug(LOG_WZ, "Adding [%s] to search path", curSearchPath->path.c_str());
 #endif // DEBUG
 				// Add global and campaign mods
-				PHYSFS_mount(curSearchPath->path, NULL, PHYSFS_APPEND);
+				WZ_PHYSFS_MountSearchPathWrapper(curSearchPath->path.c_str(), NULL, PHYSFS_APPEND);
 
-				addSubdirs(curSearchPath->path, versionedModsPath(MODS_MUSIC), PHYSFS_APPEND, nullptr, false);
-				addSubdirs(curSearchPath->path, versionedModsPath(MODS_GLOBAL), PHYSFS_APPEND, use_override_mods ? &override_mods : &global_mods, true);
-				addSubdirs(curSearchPath->path, versionedModsPath(MODS_AUTOLOAD), PHYSFS_APPEND, use_override_mods ? &override_mods : nullptr, true);
-				addSubdirs(curSearchPath->path, versionedModsPath(MODS_CAMPAIGN), PHYSFS_APPEND, use_override_mods ? &override_mods : &campaign_mods, true);
-				if (!WZ_PHYSFS_unmount(curSearchPath->path))
+				addSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_MUSIC), PHYSFS_APPEND, nullptr, false);
+				addSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_GLOBAL), PHYSFS_APPEND, use_override_mods ? &override_mods : &global_mods, true);
+				addSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_AUTOLOAD), PHYSFS_APPEND, use_override_mods ? &override_mods : nullptr, true);
+				addSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_CAMPAIGN), PHYSFS_APPEND, use_override_mods ? &override_mods : &campaign_mods, true);
+				if (!WZ_PHYSFS_unmount(curSearchPath->path.c_str()))
 				{
-					debug(LOG_WZ, "* Failed to remove path %s again", curSearchPath->path);
+					debug(LOG_WZ, "* Failed to remove path %s again", curSearchPath->path.c_str());
 				}
 
 				// Add plain dir
-				PHYSFS_mount(curSearchPath->path, NULL, PHYSFS_APPEND);
+				WZ_PHYSFS_MountSearchPathWrapper(curSearchPath->path.c_str(), NULL, PHYSFS_APPEND);
 
 				// Add base files
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "base");
-				PHYSFS_mount(tmpstr, NULL, PHYSFS_APPEND);
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "base.wz");
-				PHYSFS_mount(tmpstr, NULL, PHYSFS_APPEND);
-
-				curSearchPath = curSearchPath->higherPriority;
+				tmpstr = curSearchPath->path + "base";
+				WZ_PHYSFS_MountSearchPathWrapper(tmpstr.c_str(), NULL, PHYSFS_APPEND);
+				tmpstr = curSearchPath->path + "base.wz";
+				WZ_PHYSFS_MountSearchPathWrapper(tmpstr.c_str(), NULL, PHYSFS_APPEND);
 			}
 			break;
 		case mod_multiplay:
 			debug(LOG_WZ, "*** Switching to multiplay mods ***");
 			clearLoadedMods();
 
-			while (curSearchPath)
+			for (const auto& curSearchPath : searchPathRegistry)
 			{
 				// make sure videos override included files
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "sequences.wz");
-				PHYSFS_mount(tmpstr, NULL, PHYSFS_APPEND);
-				curSearchPath = curSearchPath->higherPriority;
+				tmpstr = curSearchPath->path + "sequences.wz";
+				WZ_PHYSFS_MountSearchPathWrapper(tmpstr.c_str(), NULL, PHYSFS_APPEND);
 			}
 			// Add the selected map first, for mapmod support
 			if (current_map != nullptr)
@@ -549,7 +550,7 @@ bool rebuildSearchPath(searchPathMode mode, bool force, const char *current_map,
 					// mount it as a normal physical map path
 					WzString realPathAndDir = WzString::fromUtf8(PHYSFS_getRealDir(current_map)) + current_map;
 					realPathAndDir.replace("/", PHYSFS_getDirSeparator()); // Windows fix
-					PHYSFS_mount(realPathAndDir.toUtf8().c_str(), current_map_mount_point, PHYSFS_APPEND);
+					WZ_PHYSFS_MountSearchPathWrapper(realPathAndDir.toUtf8().c_str(), current_map_mount_point, PHYSFS_APPEND);
 				}
 				else if (!inMemoryMapArchiveData.empty())
 				{
@@ -564,26 +565,21 @@ bool rebuildSearchPath(searchPathMode mode, bool force, const char *current_map,
 					debug(LOG_ERROR, "Specified virtual map file, but no data?");
 				}
 			}
-			curSearchPath = searchPathRegistry;
-			while (curSearchPath->lowerPriority)
-			{
-				curSearchPath = curSearchPath->lowerPriority;
-			}
-			while (curSearchPath)
+			for (const auto& curSearchPath : searchPathRegistry)
 			{
 #ifdef DEBUG
-				debug(LOG_WZ, "Adding [%s] to search path", curSearchPath->path);
+				debug(LOG_WZ, "Adding [%s] to search path", curSearchPath->path.c_str());
 #endif // DEBUG
 				// Add global and multiplay mods
-				PHYSFS_mount(curSearchPath->path, NULL, PHYSFS_APPEND);
-				addSubdirs(curSearchPath->path, versionedModsPath(MODS_MUSIC), PHYSFS_APPEND, nullptr, false);
+				WZ_PHYSFS_MountSearchPathWrapper(curSearchPath->path.c_str(), NULL, PHYSFS_APPEND);
+				addSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_MUSIC), PHYSFS_APPEND, nullptr, false);
 
 				// Only load if we are host or singleplayer (Initial mod load relies on this, too)
 				if (ingame.side == InGameSide::HOST_OR_SINGLEPLAYER || !NetPlay.bComms)
 				{
-					addSubdirs(curSearchPath->path, versionedModsPath(MODS_GLOBAL), PHYSFS_APPEND, use_override_mods ? &override_mods : &global_mods, true);
-					addSubdirs(curSearchPath->path, versionedModsPath(MODS_AUTOLOAD), PHYSFS_APPEND, use_override_mods ? &override_mods : nullptr, true);
-					addSubdirs(curSearchPath->path, versionedModsPath(MODS_MULTIPLAY), PHYSFS_APPEND, use_override_mods ? &override_mods : &multiplay_mods, true);
+					addSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_GLOBAL), PHYSFS_APPEND, use_override_mods ? &override_mods : &global_mods, true);
+					addSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_AUTOLOAD), PHYSFS_APPEND, use_override_mods ? &override_mods : nullptr, true);
+					addSubdirs(curSearchPath->path.c_str(), versionedModsPath(MODS_MULTIPLAY), PHYSFS_APPEND, use_override_mods ? &override_mods : &multiplay_mods, true);
 				}
 				else
 				{
@@ -591,31 +587,25 @@ bool rebuildSearchPath(searchPathMode mode, bool force, const char *current_map,
 					for (Sha256 &hash : game.modHashes)
 					{
 						hashList = {hash.toString()};
-						addSubdirs(curSearchPath->path, "mods/downloads", PHYSFS_APPEND, &hashList, true); // not versioned
+						addSubdirs(curSearchPath->path.c_str(), "mods/downloads", PHYSFS_APPEND, &hashList, true); // not versioned
 					}
 				}
-				WZ_PHYSFS_unmount(curSearchPath->path);
+				WZ_PHYSFS_unmount(curSearchPath->path.c_str());
 
 				// Add multiplay patches
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "mp");
-				PHYSFS_mount(tmpstr, NULL, PHYSFS_APPEND);
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "mp.wz");
-				PHYSFS_mount(tmpstr, NULL, PHYSFS_APPEND);
+				tmpstr = curSearchPath->path + "mp";
+				WZ_PHYSFS_MountSearchPathWrapper(tmpstr.c_str(), NULL, PHYSFS_APPEND);
+				tmpstr = curSearchPath->path + "mp.wz";
+				WZ_PHYSFS_MountSearchPathWrapper(tmpstr.c_str(), NULL, PHYSFS_APPEND);
 
 				// Add plain dir
-				PHYSFS_mount(curSearchPath->path, NULL, PHYSFS_APPEND);
+				WZ_PHYSFS_MountSearchPathWrapper(curSearchPath->path.c_str(), NULL, PHYSFS_APPEND);
 
 				// Add base files
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "base");
-				PHYSFS_mount(tmpstr, NULL, PHYSFS_APPEND);
-				sstrcpy(tmpstr, curSearchPath->path);
-				sstrcat(tmpstr, "base.wz");
-				PHYSFS_mount(tmpstr, NULL, PHYSFS_APPEND);
-
-				curSearchPath = curSearchPath->higherPriority;
+				tmpstr = curSearchPath->path + "base";
+				WZ_PHYSFS_MountSearchPathWrapper(tmpstr.c_str(), NULL, PHYSFS_APPEND);
+				tmpstr = curSearchPath->path + "base.wz";
+				WZ_PHYSFS_MountSearchPathWrapper(tmpstr.c_str(), NULL, PHYSFS_APPEND);
 			}
 			break;
 		default:
@@ -634,7 +624,7 @@ bool rebuildSearchPath(searchPathMode mode, bool force, const char *current_map,
 
 		// User's home dir must be first so we always see what we write
 		WZ_PHYSFS_unmount(PHYSFS_getWriteDir());
-		PHYSFS_mount(PHYSFS_getWriteDir(), NULL, PHYSFS_PREPEND);
+		WZ_PHYSFS_MountSearchPathWrapper(PHYSFS_getWriteDir(), NULL, PHYSFS_PREPEND);
 
 #ifdef DEBUG
 		printSearchPath();
@@ -702,11 +692,21 @@ static MapFileList listMapFiles()
 		{
 			size_t numMapGamFiles = 0;
 			size_t numMapFolders = 0;
-			bool enumSuccess = WZ_PHYSFS_enumerateFiles("multiplay/maps", [&numMapGamFiles, &numMapFolders, &realFilePathAndName](const char *file) -> bool {
-				std::string isDir = std::string("multiplay/maps/") + file;
+			const std::string baseMapsPath("multiplay/maps/");
+			bool enumSuccess = WZ_PHYSFS_enumerateFiles("multiplay/maps", [&numMapGamFiles, &numMapFolders, &baseMapsPath, &realFilePathAndName](const char *file) -> bool {
+				if (!file)
+				{
+					return true; // continue
+				}
+				std::string isDir = baseMapsPath + file;
 				if (WZ_PHYSFS_isDirectory(isDir.c_str()))
 				{
-					if (numMapFolders++ > 1)
+					if (baseMapsPath.size() == isDir.size())
+					{
+						// for some reason, file is an empty string - just skip
+						return true; // continue;
+					}
+					if (++numMapFolders > 1)
 					{
 						debug(LOG_ERROR, "Map packs are not supported! %s NOT added.", realFilePathAndName.c_str());
 						return false; // break;
@@ -717,7 +717,7 @@ static MapFileList listMapFiles()
 				debug(LOG_WZ, "checking ... %s", file);
 				if (checkfile.substr(checkfile.find_last_of('.') + 1) == "gam")
 				{
-					if (numMapGamFiles++ > 1)
+					if (++numMapGamFiles > 1)
 					{
 						debug(LOG_ERROR, "Map packs are not supported! %s NOT added.", realFilePathAndName.c_str());
 						return false; // break;
@@ -1157,6 +1157,7 @@ void systemShutdown()
 	widgShutDown();
 	fpathShutdown();
 	mapShutdown();
+	modelShutdown();
 	debug(LOG_MAIN, "shutting down everything else");
 	pal_ShutDown();		// currently unused stub
 	frameShutDown();	// close screen / SDL / resources / cursors / trig
@@ -1588,8 +1589,6 @@ bool stageTwoShutDown()
 		return false;
 	}
 
-	shutdown3DView();
-
 	return true;
 }
 
@@ -1733,6 +1732,8 @@ bool stageThreeShutDown()
 	}
 
 	setScriptWinLoseVideo(PLAY_NONE);
+
+	shutdown3DView();
 
 	return true;
 }

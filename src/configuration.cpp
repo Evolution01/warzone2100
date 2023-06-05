@@ -377,6 +377,10 @@ bool loadConfig()
 	setInvertMouseStatus(iniGetBool("mouseflip", true).value());
 	setRightClickOrders(iniGetBool("RightClickOrders", false).value());
 	setMiddleClickRotate(iniGetBool("MiddleClickRotate", false).value());
+	if (auto value = iniGetIntegerOpt("cursorScale"))
+	{
+		war_setCursorScale(value.value());
+	}
 	if (auto value = iniGetBoolOpt("radarJump"))
 	{
 		war_SetRadarJump(value.value());
@@ -570,7 +574,8 @@ bool loadConfig()
 bool saveConfig()
 {
 	// first, create a file instance
-	mINI::INIFile file(std::make_shared<PhysFSFileStreamGenerator>(fileName));
+	auto fileStreamGenerator = std::make_shared<PhysFSFileStreamGenerator>(fileName);
+	mINI::INIFile file(fileStreamGenerator);
 
 	// next, create a structure that will hold data
 	mINI::INIStructure ini;
@@ -578,7 +583,15 @@ bool saveConfig()
 	// read in the current file
 	try
 	{
-		if (!file.read(ini))
+		uint64_t fileSize = fileStreamGenerator->fileSize().value_or(0);
+		bool skipLoadExisting = false;
+		if (fileSize > MAX_CONFIG_FILE_SIZE)
+		{
+			skipLoadExisting = true;
+			debug(LOG_ERROR, "Could not read existing configuration file \"%s\"; filesize (%" PRIu64 ") exceeds max", fileName, fileSize);
+			// will just proceed with an empty ini structure
+		}
+		if (!skipLoadExisting && !file.read(ini))
 		{
 			debug(LOG_WZ, "Could not read existing configuration file \"%s\"", fileName);
 			// will just proceed with an empty ini structure
@@ -587,7 +600,8 @@ bool saveConfig()
 	catch (const std::exception& e)
 	{
 		debug(LOG_ERROR, "Ini read failed with exception: %s", e.what());
-		return false;
+		ini.clear();
+		// will just proceed with an empty ini structure
 	}
 
 	std::string fullConfigFilePath;
@@ -641,6 +655,7 @@ bool saveConfig()
 	iniSetInteger("coloredCursor", (int)war_GetColouredCursor());
 	iniSetInteger("RightClickOrders", (int)(getRightClickOrders()));
 	iniSetInteger("MiddleClickRotate", (int)(getMiddleClickRotate()));
+	iniSetInteger("cursorScale", (int)war_getCursorScale());
 	iniSetInteger("textureCompression", (wz_texture_compression) ? 1 : 0);
 	iniSetInteger("showFPS", (int)showFPS);
 	iniSetInteger("showUNITCOUNT", (int)showUNITCOUNT);
@@ -678,7 +693,7 @@ bool saveConfig()
 	iniSetString("publicIPv6LookupService_JSONKey", getPublicIPv6LookupServiceJSONKey());
 	if (!bMultiPlayer)
 	{
-		iniSetInteger("colour", (int)getPlayerColour(0));			// favourite colour.
+		iniSetInteger("colour", (int)war_GetSPcolor());			// favourite colour.
 	}
 	else
 	{
@@ -721,6 +736,52 @@ bool saveConfig()
 	iniSetInteger("fogEnd", war_getFogEnd());
 	iniSetInteger("fogStart", war_getFogStart());
 	iniSetInteger("configVersion", CURRCONFVERSION);
+
+	// write out ini file changes
+	bool result = saveIniFile(file, ini);
+	return result;
+}
+
+bool saveGfxConfig()
+{
+	// first, create a file instance
+	mINI::INIFile file(std::make_shared<PhysFSFileStreamGenerator>(fileName));
+
+	// next, create a structure that will hold data
+	mINI::INIStructure ini;
+
+	// read in the current file
+	try
+	{
+		if (!file.read(ini))
+		{
+			debug(LOG_WZ, "Could not read existing configuration file \"%s\"", fileName);
+			// will just proceed with an empty ini structure
+		}
+	}
+	catch (const std::exception& e)
+	{
+		debug(LOG_ERROR, "Ini read failed with exception: %s", e.what());
+		return false;
+	}
+
+	std::string fullConfigFilePath;
+	if (PHYSFS_getWriteDir())
+	{
+		fullConfigFilePath += PHYSFS_getWriteDir();
+		fullConfigFilePath += "/";
+	}
+	fullConfigFilePath += fileName;
+	debug(LOG_WZ, "Writing gfx configuration to: \"%s\"", fullConfigFilePath.c_str());
+
+	auto& iniGeneral = ini["General"];
+
+	auto iniSetString = [&iniGeneral](const std::string& key, const std::string& value) {
+		iniGeneral[key] = value;
+	};
+
+	// only change the gfx entry
+	iniSetString("gfxbackend", to_string(war_getGfxBackend()));
 
 	// write out ini file changes
 	bool result = saveIniFile(file, ini);

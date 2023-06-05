@@ -116,7 +116,13 @@
 bool saveJSONToFile(const nlohmann::json& obj, const char* pFileName)
 {
 	std::ostringstream stream;
-	stream << obj.dump(4) << std::endl;
+	try {
+		stream << obj.dump(4) << std::endl;
+	}
+	catch (const std::exception &e) {
+		ASSERT(false, "Failed to save JSON to %s with error: %s", pFileName, e.what());
+		return false;
+	}
 	std::string jsonString = stream.str();
 	debug(LOG_SAVE, "%s %s", "Saving", pFileName);
 	return saveFile(pFileName, jsonString.c_str(), jsonString.size());
@@ -2006,8 +2012,10 @@ static void serializeSaveGameData_json(nlohmann::json &o, nlohmann::json &savein
 	
 	// This file lists saved games, and their build info
 	// one per savegame directory
-	const auto tag = version_extractVersionNumberFromTag(version_getLatestTag());
-	saveinfo["latestTagArray"] = nlohmann::json::array({tag.value().version[0], tag.value().version[1], tag.value().version[2]});
+	const auto tagResult = version_extractVersionNumberFromTag(version_getLatestTag());
+	ASSERT(tagResult.has_value(), "No extractable latest tag?? - Please try re-downloading the latest official source bundle");
+	const TagVer tag = tagResult.value_or(TagVer());
+	saveinfo["latestTagArray"] = nlohmann::json::array({tag.version[0], tag.version[1], tag.version[2]});
 	const auto epoch  = std::chrono::system_clock::now().time_since_epoch();
 	saveinfo["epoch"] = std::chrono::duration_cast<std::chrono::seconds>(epoch).count();
 	if (saveinfo.contains(saveName))
@@ -2244,7 +2252,7 @@ static bool writeResearchFile(char *pFileName);
 static bool loadSaveMessage(const char* pFileName, LEVEL_TYPE levelType);
 static bool writeMessageFile(const char *pFileName);
 
-static bool loadSaveStructLimits(const char *pFileName);
+static bool loadSaveLimits(const char *pFileName);
 static bool writeStructLimitsFile(const char *pFileName);
 
 static bool readFiresupportDesignators(const char *pFileName);
@@ -2769,6 +2777,19 @@ bool loadGame(const char *pGameToLoad, bool keepObjects, bool freeMem, bool User
 		}
 	}
 
+	if ((saveGameVersion >= VERSION_15) && UserSaveGame)
+	{
+		aFileName[fileExten] = '\0';
+		strcat(aFileName, "limits.json");
+
+		//load the data into apsStructLists
+		if (!loadSaveLimits(aFileName))
+		{
+			debug(LOG_ERROR, "failed to load %s", aFileName);
+			goto error;
+		}
+	}
+
 	if (saveGameOnMission && UserSaveGame)
 	{
 		//the scroll limits for the mission map have already been written
@@ -3198,23 +3219,10 @@ bool loadGame(const char *pGameToLoad, bool keepObjects, bool freeMem, bool User
 
 	if ((saveGameVersion >= VERSION_15) && UserSaveGame)
 	{
-		//load in the mission structures
-		aFileName[fileExten] = '\0';
-		strcat(aFileName, "limits.json");
-
-		//load the data into apsStructLists
-		if (!loadSaveStructLimits(aFileName))
-		{
-			debug(LOG_ERROR, "failed to load %s", aFileName);
-			goto error;
-		}
-
-		//set up the structure Limits
 		setCurrentStructQuantity(false);
 	}
 	else
 	{
-		//set up the structure Limits
 		setCurrentStructQuantity(true);
 	}
 
@@ -3659,7 +3667,7 @@ static bool gameLoad(const char *fileName)
 	strcpy(CurrentFileName, fileName);
 	GAME_SAVEHEADER fileHeader = {};
 	auto gamJsonSave = readGamJson(fileName);
-	debug(LOG_SAVEGAME, "loading %s", fileName);
+	debug(LOG_INFO, "loading: %s", fileName);
 	PHYSFS_file *fileHandle = openLoadFile(fileName, false);
 	if (!gamJsonSave.has_value() && fileHandle)
 	{
@@ -4979,15 +4987,17 @@ static bool writeGameFile(const char *fileName, SDWORD saveType)
 	const std::string saveInfoJsonFilename = pathToThisSaveDir + "save-info.json";
 	const std::string jsonFileName = pathToThisSaveDir + "gam.json";
 	auto gamJson = nlohmann::json::object();
-	
-	if (!PHYSFS_exists(saveInfoJsonFilename.c_str()))
-	{
-		// save empty {} into save-info.jsons
-		saveFile(saveInfoJsonFilename.c_str(), "{}", 2);
-	}
 
-	auto saveInfoJsonOpt = parseJsonFile(saveInfoJsonFilename.c_str());
-	ASSERT(saveInfoJsonOpt.has_value() && saveInfoJsonOpt.value().is_object(), "save-info.json looks broken, wanted an object");
+	nonstd::optional<nlohmann::json> saveInfoJsonOpt = nullopt;
+	if (PHYSFS_exists(saveInfoJsonFilename.c_str()))
+	{
+		saveInfoJsonOpt = parseJsonFile(saveInfoJsonFilename.c_str());
+		ASSERT(saveInfoJsonOpt.has_value() && saveInfoJsonOpt.value().is_object(), "save-info.json looks broken, wanted an object");
+	}
+	if (!saveInfoJsonOpt.has_value() || !saveInfoJsonOpt.value().is_object())
+	{
+		saveInfoJsonOpt = nlohmann::json::object();
+	}
 	auto saveInfoJson = saveInfoJsonOpt.value();
 	// new .json format
 	serializeSaveGameData_json(gamJson, saveInfoJson, gameName.c_str(), &saveGame);
@@ -5809,15 +5819,13 @@ static bool writeDroidFile(const char *pFileName, DROID **ppsCurrentDroidLists)
 				//always save transporter droids that are in the mission list with an invalid value
 				if (ppsCurrentDroidLists[player] == mission.apsDroidLists[player])
 				{
-					mRoot[droidKey.toStdString()]["position"] = Vector3i(-1, -1, -1); // was INVALID_XY
+					mRoot[droidKey.toStdString()]["position"] = Vector3i(INVALID_XY, INVALID_XY, -1); // Must be INVALID_XY or else unit placement could get messed up in missionResetDroids().
 				}
 			}
 		}
 	}
 
-	saveJSONToFile(mRoot, pFileName);
-
-	return true;
+	return saveJSONToFile(mRoot, pFileName);
 }
 
 
@@ -6564,9 +6572,15 @@ bool loadSaveStructurePointers(const WzString& filename, STRUCTURE **ppList)
 				int tid = ini.value("target/" + WzString::number(j) + "/id", -1).toInt();
 				int tplayer = ini.value("target/" + WzString::number(j) + "/player", -1).toInt();
 				OBJECT_TYPE ttype = (OBJECT_TYPE)ini.value("target/" + WzString::number(j) + "/type", 0).toInt();
-				ASSERT(tid >= 0 && tplayer >= 0, "Bad ID");
-				setStructureTarget(psStruct, getBaseObjFromData(tid, tplayer, ttype), j, ORIGIN_UNKNOWN);
-				ASSERT(psStruct->psTarget[j], "Failed to find target");
+				if (tid >= 0 && tplayer >= 0)
+				{
+					setStructureTarget(psStruct, getBaseObjFromData(tid, tplayer, ttype), j, ORIGIN_UNKNOWN);
+					ASSERT(psStruct->psTarget[j], "Failed to find target");
+				}
+				else
+				{
+					ASSERT(tid >= 0 && tplayer >= 0, "Bad ID");
+				}
 			}
 		}
 		if (ini.contains("Factory/commander/id")) {
@@ -6576,16 +6590,22 @@ bool loadSaveStructurePointers(const WzString& filename, STRUCTURE **ppList)
 				OBJECT_TYPE ttype = OBJ_DROID;
 				int tid = ini.value("Factory/commander/id", -1).toInt();
 				int tplayer = ini.value("Factory/commander/player", -1).toInt();
-				ASSERT(tid >= 0 && tplayer >= 0, "Bad commander ID %d for player %d for building %d", tid, tplayer, id);
-				DROID *psCommander = (DROID *)getBaseObjFromData(tid, tplayer, ttype);
-				ASSERT(psCommander, "Commander %d not found for building %d", tid, id);
-				if (ppList == mission.apsStructLists)
+				if (tid >= 0 && tplayer >= 0)
 				{
-					psFactory->psCommander = psCommander;
+					DROID *psCommander = (DROID *)getBaseObjFromData(tid, tplayer, ttype);
+					ASSERT(psCommander, "Commander %d not found for building %d", tid, id);
+					if (ppList == mission.apsStructLists)
+					{
+						psFactory->psCommander = psCommander;
+					}
+					else
+					{
+						assignFactoryCommandDroid(psStruct, psCommander);
+					}
 				}
 				else
 				{
-					assignFactoryCommandDroid(psStruct, psCommander);
+					ASSERT(tid >= 0 && tplayer >= 0, "Bad commander ID %d for player %d for building %d", tid, tplayer, id);
 				}
 		}
 		if (ini.contains("Repair/target/id")){
@@ -6594,9 +6614,16 @@ bool loadSaveStructurePointers(const WzString& filename, STRUCTURE **ppList)
 				OBJECT_TYPE ttype = (OBJECT_TYPE)ini.value("Repair/target/type", OBJ_DROID).toInt();
 				int tid = ini.value("Repair/target/id", -1).toInt();
 				int tplayer = ini.value("Repair/target/player", -1).toInt();
-				ASSERT(tid >= 0 && tplayer >= 0, "Bad repair ID %d for player %d for building %d", tid, tplayer, id);
-				psRepair->psObj = getBaseObjFromData(tid, tplayer, ttype);
-				ASSERT(psRepair->psObj, "Repair target %d not found for building %d", tid, id);
+				if (tid >= 0 && tplayer >= 0)
+				{
+					psRepair->psObj = getBaseObjFromData(tid, tplayer, ttype);
+					ASSERT(psRepair->psObj, "Repair target %d not found for building %d", tid, id);
+				}
+				else
+				{
+					ASSERT(tid >= 0 && tplayer >= 0, "Bad repair ID %d for player %d for building %d", tid, tplayer, id);
+					psRepair->psObj = nullptr;
+				}
 		}
 		if (ini.contains("Rearm/target/id")) {
 				ASSERT(psStruct->pStructureType->type == REF_REARM_PAD, "Bad type");
@@ -6604,9 +6631,16 @@ bool loadSaveStructurePointers(const WzString& filename, STRUCTURE **ppList)
 				OBJECT_TYPE ttype = OBJ_DROID; // always, for now
 				int tid = ini.value("Rearm/target/id", -1).toInt();
 				int tplayer = ini.value("Rearm/target/player", -1).toInt();
-				ASSERT(tid >= 0 && tplayer >= 0, "Bad rearm ID %d for player %d for building %d", tid, tplayer, id);
-				psReArmPad->psObj = getBaseObjFromData(tid, tplayer, ttype);
-				ASSERT(psReArmPad->psObj, "Rearm target %d not found for building %d", tid, id);
+				if (tid >= 0 && tplayer >= 0)
+				{
+					psReArmPad->psObj = getBaseObjFromData(tid, tplayer, ttype);
+					ASSERT(psReArmPad->psObj, "Rearm target %d not found for building %d", tid, id);
+				}
+				else
+				{
+					ASSERT(tid >= 0 && tplayer >= 0, "Bad rearm ID %d for player %d for building %d", tid, tplayer, id);
+					psReArmPad->psObj = nullptr;
+				}
 		}
 
 		ini.endGroup();
@@ -6960,8 +6994,7 @@ bool writeTemplateFile(const char *pFileName)
 	}
 	mRoot["localTemplates"] = std::move(localtemplates_array);
 
-	saveJSONToFile(mRoot, pFileName);
-	return true;
+	return saveJSONToFile(mRoot, pFileName);
 }
 
 // -----------------------------------------------------------------------------------------
@@ -7583,7 +7616,7 @@ static bool writeMessageFile(const char *pFileName)
 }
 
 // -----------------------------------------------------------------------------------------
-bool loadSaveStructLimits(const char *pFileName)
+bool loadSaveLimits(const char *pFileName)
 {
 	WzConfig ini(pFileName, WzConfig::ReadOnly);
 

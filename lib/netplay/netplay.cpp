@@ -123,7 +123,6 @@ static void NETplayerDropped(UDWORD player);		// Broadcast NET_PLAYER_DROPPED & 
 static void NETallowJoining();
 static void recvDebugSync(NETQUEUE queue);
 static bool onBanList(const char *ip);
-static void addToBanList(const char *ip, const char *name);
 static void NETfixPlayerCount();
 /*
  * Network globals, these are part of the new network API
@@ -794,6 +793,7 @@ static optional<uint32_t> NET_CreatePlayer(char const *name, bool forceTakeLowes
 	NETlogEntry(buf, SYNC_FLAG, index.value());
 	NET_InitPlayer(index.value(), false);  // re-init everything
 	NetPlay.players[index.value()].allocated = true;
+	NetPlay.players[index.value()].difficulty = AIDifficulty::HUMAN;
 	setPlayerName(index.value(), name);
 	if (!NetPlay.players[index.value()].isSpectator)
 	{
@@ -949,10 +949,6 @@ void NETplayerKicked(UDWORD index)
 	debug(LOG_INFO, "Player %u was kicked.", index);
 	sync_counter.kicks++;
 	NETlogEntry("Player was kicked.", SYNC_FLAG, index);
-	if (NetPlay.isHost && NetPlay.players[index].allocated)
-	{
-		addToBanList(NetPlay.players[index].IPtextAddress, NetPlay.players[index].name);
-	}
 	NETplayerLeaving(index);		// need to close socket for the player that left.
 	NETsetPlayerConnectionStatus(CONNECTIONSTATUS_PLAYER_LEAVING, index);
 }
@@ -1430,7 +1426,7 @@ static bool upnp_add_redirect(int port)
 		debug(LOG_NET, "%s", buf);
 		addConsoleMessage(buf, DEFAULT_JUSTIFY, NOTIFY_MESSAGE);
 		// beware of writing a line too long, it screws up console line count. \n is safe for line split
-		ssprintf(buf, "%s", _("You must manually configure your router & firewall to\n open port 2100 before you can host a game."));
+		ssprintf(buf, _("You must manually configure your router & firewall to\n open port %d before you can host a game."), NETgetGameserverPort());
 		addConsoleMessage(buf, DEFAULT_JUSTIFY, NOTIFY_MESSAGE);
 		return false;
 	}
@@ -1877,13 +1873,15 @@ static bool swapPlayerIndexes(uint32_t playerIndexA, uint32_t playerIndexB)
 		NetPlay.playerReferences[playerIndex]->disconnect();
 		NetPlay.playerReferences[playerIndex] = std::make_shared<PlayerReference>(playerIndex);
 
-		setMultiStats(playerIndex, PLAYERSTATS(), true); // local only - we will await this to be sent again by each player
 		//
 //		if (playerIndex < MAX_PLAYERS)
 //		{
 //			playerVotes[playerIndex] = 0;
 //		}
 	}
+
+	// Swap the player multistats / identity info
+	swapPlayerMultiStatsLocal(playerIndexA, playerIndexB);
 
 	// Swap the NetPlay PLAYER entries
 	NetPlay.players[playerIndexB] = std::move(playersData[0]);
@@ -1928,6 +1926,20 @@ static bool swapPlayerIndexes(uint32_t playerIndexA, uint32_t playerIndexB)
 			NetPlay.players[playerIndex].difficulty =  AIDifficulty::DISABLED;
 			NetPlay.players[playerIndex].ai = AI_OPEN;
 			clearPlayerName(playerIndex);
+		}
+		if (!NetPlay.players[playerIndex].allocated && NetPlay.players[playerIndex].ai < 0)
+		{
+			ASSERT(NetPlay.players[playerIndex].difficulty == AIDifficulty::DISABLED, "Unexpected difficulty (%d) for player (%d)", (int)NetPlay.players[playerIndex].difficulty, playerIndex);
+		}
+
+		if (NetPlay.players[playerIndex].allocated
+			&& playerIndex < MAX_PLAYERS)
+		{
+			if (NetPlay.players[playerIndex].difficulty != AIDifficulty::HUMAN)
+			{
+				debug(LOG_INFO, "Fixing up human difficulty for player: %d", playerIndex);
+				NetPlay.players[playerIndex].difficulty = AIDifficulty::HUMAN;
+			}
 		}
 	}
 
@@ -2075,11 +2087,6 @@ SpectatorToPlayerMoveResult NETmoveSpectatorToPlayerSlot(uint32_t playerIdx, opt
 		}
 	}
 
-	// Since a spectator could be moved into a Closed or AI slot, clear the closed or AI status on the target slot.
-	// (If swapping with a player slot, these should already be set as such.)
-	NetPlay.players[newPlayerIdx.value()].ai = AI_OPEN;
-	NetPlay.players[newPlayerIdx.value()].difficulty = AIDifficulty::DISABLED;
-
 	// Backup the spectator's identity for later recording
 	auto spectatorPublicKeyIdentity = getMultiStats(playerIdx).identity.toBytes(EcKey::Privacy::Public);
 
@@ -2124,7 +2131,7 @@ static inline bool NETFilterMessageWhileSwappingPlayer(uint8_t sender, uint8_t t
 		ssprintf(msg, "Auto-kicking player %u, did not ack player index change within required timeframe.", (unsigned int)sender);
 		sendInGameSystemMessage(msg);
 		debug(LOG_INFO, "Client (player: %u) failed to ack player index swap (ignoring message type: %" PRIu8 ")", sender, type);
-		kickPlayer(sender, _("Client failed to ack player index swap"), ERROR_INVALID);
+		kickPlayer(sender, _("Client failed to ack player index swap"), ERROR_INVALID, false);
 		return true; // filter original message, of course
 	}
 
@@ -2293,7 +2300,7 @@ static bool NETprocessSystemMessage(NETQUEUE playerQueue, uint8_t type)
 					ssprintf(msg, "Auto-kicking player %u, lacked the required access level for command(%d).", (unsigned int)sender, (int)message->type);
 					sendRoomSystemMessage(msg);
 					NETlogEntry(msg, SYNC_FLAG, sender);
-					addToBanList(NetPlay.players[sender].IPtextAddress, NetPlay.players[sender].name);
+					addIPToBanList(NetPlay.players[sender].IPtextAddress, NetPlay.players[sender].name);
 					NETplayerDropped(sender);
 					connected_bsocket[sender] = nullptr;
 					debug(LOG_ERROR, "%s", msg);
@@ -2704,7 +2711,7 @@ static void NETcheckPlayers()
 		if (NetPlay.players[i].kick)
 		{
 			debug(LOG_NET, "Kicking player %d", i);
-			kickPlayer(i, "you are unwanted by the host.", ERROR_KICKED);
+			kickPlayer(i, "you are unwanted by the host.", ERROR_KICKED, false);
 		}
 	}
 }
@@ -2716,6 +2723,7 @@ static void NETcheckPlayers()
 bool NETrecvNet(NETQUEUE *queue, uint8_t *type)
 {
 	const int status = upnp_status.load(); // hack fix for clang and c++11 - fixed in standard for c++14
+	char buf[512] = {'\0'};
 	switch (status)
 	{
 	case UPNP_ERROR_CONTROL_NOT_AVAILABLE:
@@ -2729,7 +2737,8 @@ bool NETrecvNet(NETQUEUE *queue, uint8_t *type)
 			debug(LOG_NET, "controlURL not available, UPnP disabled");
 		}
 		// beware of writing a line too long, it screws up console line count. \n is safe for line split
-		addConsoleMessage(_("No UPnP device found. Configure your router/firewall to open port 2100!"), DEFAULT_JUSTIFY, NOTIFY_MESSAGE);
+		ssprintf(buf, _("No UPnP device found. Configure your router/firewall to open port %d!"), NETgetGameserverPort());
+		addConsoleMessage(buf, DEFAULT_JUSTIFY, NOTIFY_MESSAGE);
 		NetPlay.isUPNP_CONFIGURED = false;
 		NetPlay.isUPNP_ERROR = true;
 		upnp_status = 0;
@@ -3702,7 +3711,7 @@ static void NETallowJoining()
 				debug(LOG_INFO, "An old client tried to connect, closing the socket.");
 				NETlogEntry("Dropping old client.", SYNC_FLAG, i);
 				NETlogEntry("Invalid (old)game version", SYNC_FLAG, i);
-				addToBanList(rIP.c_str(), "BAD_USER");
+				addIPToBanList(rIP.c_str(), "BAD_USER");
 				connectFailed = true;
 			}
 			else
@@ -3760,7 +3769,7 @@ static void NETallowJoining()
 					memcpy(&buffer, &result, sizeof(result));
 					writeAll(tmp_socket[i], &buffer, sizeof(result));
 					NETlogEntry("Invalid game version", SYNC_FLAG, i);
-					addToBanList(rIP.c_str(), "BAD_USER");
+					addIPToBanList(rIP.c_str(), "BAD_USER");
 					connectFailed = true;
 				}
 				if ((!connectFailed) && (!NET_HasAnyOpenSlots()))
@@ -4019,7 +4028,7 @@ void NETloadBanList() {
 				debug(LOG_ERROR, "Error reading banlist file!\n");
 			}
 		} else {
-			addToBanList(ToBanIP, ToBanName);
+			addIPToBanList(ToBanIP, ToBanName);
 		}
 	}
 	return;
@@ -4045,6 +4054,7 @@ bool NEThostGame(const char *SessionName, const char *PlayerName, bool spectator
 		NetPlay.isHost			= true;
 		NetPlay.hostPlayer 		= selectedPlayer;
 		NetPlay.players[0].allocated	= true;
+		NetPlay.players[0].difficulty	= AIDifficulty::HUMAN;
 		NetPlay.playercount		= 1;
 		debug(LOG_NET, "Hosting but no comms");
 		// Now switch player color of the host to what they normally use for MP games
@@ -5348,7 +5358,7 @@ static bool onBanList(const char *ip)
  * \param ip IP address in text format
  * \param name Name of the player we are banning
  */
-static void addToBanList(const char *ip, const char *name)
+void addIPToBanList(const char *ip, const char *name)
 {
 	if (isLoopbackIP(ip))
 	{
@@ -5364,6 +5374,19 @@ static void addToBanList(const char *ip, const char *name)
 		debug(LOG_INFO, "We have exceeded %d bans, clearing oldest", MAX_BANS);
 		IPlist.pop_front();
 	}
+}
+
+bool removeIPFromBanList(const char *ip)
+{
+	auto it = std::find_if(IPlist.begin(), IPlist.end(), [ip](const PLAYER_IP& ipInfo) -> bool {
+		return strcmp(ipInfo.IPAddress, ip) == 0;
+	});
+	if (it == IPlist.end())
+	{
+		return false;
+	}
+	IPlist.erase(it);
+	return true;
 }
 
 std::vector<PLAYER_IP> NETgetIPBanList()

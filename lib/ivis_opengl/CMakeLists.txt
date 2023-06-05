@@ -68,7 +68,7 @@ include(WZTargetConfiguration)
 WZ_TARGET_CONFIGURATION(ivis-opengl)
 
 target_include_directories(ivis-opengl PRIVATE ${HARFBUZZ_INCLUDE_DIRS} ${FREETYPE_INCLUDE_DIR_ft2build})
-target_link_libraries(ivis-opengl PRIVATE framework PNG::PNG ${HARFBUZZ_LIBRARIES} ${FREETYPE_LIBRARIES})
+target_link_libraries(ivis-opengl PRIVATE framework launchinfo PNG::PNG ${HARFBUZZ_LIBRARIES} ${FREETYPE_LIBRARIES})
 target_link_libraries(ivis-opengl PUBLIC glad)
 target_link_libraries(ivis-opengl PUBLIC optional-lite)
 if (WZ_DEBUG_GFX_API_LEAKS)
@@ -94,7 +94,7 @@ endif()
 
 if(WZ_ENABLE_BACKEND_VULKAN)
 	find_package(VulkanHeaders 154) # minimum supported version of the Vulkan headers is 154
-	set(_vulkanheaders_dl_gittag "sdk-1.3.224.1")
+	set(_vulkanheaders_dl_gittag "sdk-1.3.231.1")
 	if((NOT VulkanHeaders_FOUND AND NOT ${CMAKE_VERSION} VERSION_LESS "3.11.0") AND (NOT WZ_DISABLE_FETCHCONTENT_GIT_CLONE))
 		# Fetch newer Vulkan headers (using FetchContent, which requires CMake 3.11+)
 		include(FetchContent)

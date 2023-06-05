@@ -762,6 +762,8 @@ BASE_OBJECT *getBaseObjFromData(unsigned id, unsigned player, OBJECT_TYPE type)
 	BASE_OBJECT		*psObj;
 	DROID			*psTrans;
 
+	ASSERT_OR_RETURN(nullptr, player < MAX_PLAYERS || type == OBJ_FEATURE, "Invalid player: %u", player);
+
 	for (int i = 0; i < 3; ++i)
 	{
 		psObj = nullptr;
@@ -802,6 +804,7 @@ BASE_OBJECT *getBaseObjFromData(unsigned id, unsigned player, OBJECT_TYPE type)
 			// if transporter check any droids in the grp
 			if ((psObj->type == OBJ_DROID) && isTransporter((DROID *)psObj))
 			{
+				ASSERT_OR_RETURN(nullptr, ((DROID *)psObj)->psGroup != nullptr, "Transporter has null group?");
 				for (psTrans = ((DROID *)psObj)->psGroup->psList; psTrans != nullptr; psTrans = psTrans->psGrpNext)
 				{
 					if (psTrans->id == id)
@@ -1003,7 +1006,7 @@ void objCount(int *droids, int *structures, int *features)
 		for (DROID *psDroid = apsDroidLists[i]; psDroid; psDroid = psDroid->psNext)
 		{
 			(*droids)++;
-			if (isTransporter(psDroid))
+			if (isTransporter(psDroid) && psDroid->psGroup && psDroid->psGroup->psList)
 			{
 				DROID *psTrans = psDroid->psGroup->psList;
 

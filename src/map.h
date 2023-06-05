@@ -80,6 +80,7 @@ extern float waterLevel;
 extern std::unique_ptr<GROUND_TYPE[]> psGroundTypes;
 extern int numGroundTypes;
 extern char *tilesetDir;
+extern MAP_TILESET currentMapTileset;
 
 #define AIR_BLOCKED		0x01	///< Aircraft cannot pass tile
 #define FEATURE_BLOCKED		0x02	///< Ground units cannot pass tile due to item in the way
@@ -162,7 +163,7 @@ WZ_DECL_ALWAYS_INLINE static inline void auxSetAllied(int x, int y, int player, 
 
 	for (i = 0; i < MAX_PLAYERS; i++)
 	{
-		if (alliancebits[player] & (1 << i))
+		if (aiCheckAlliances(player, i))
 		{
 			psAuxMap[i][x + y * mapWidth] |= state;
 		}
@@ -176,7 +177,7 @@ WZ_DECL_ALWAYS_INLINE static inline void auxSetEnemy(int x, int y, int player, i
 
 	for (i = 0; i < MAX_PLAYERS; i++)
 	{
-		if (!(alliancebits[player] & (1 << i)))
+		if (!aiCheckAlliances(player, i))
 		{
 			psAuxMap[i][x + y * mapWidth] |= state;
 		}

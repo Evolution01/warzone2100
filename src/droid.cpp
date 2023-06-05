@@ -1142,19 +1142,20 @@ int getRecoil(WEAPON const &weapon)
 
 void droidWasFullyRepaired(DROID *psDroid, const REPAIR_FACILITY *psRepairFac)
 {
-	if (hasCommander(psDroid))
+	const bool prevWasRTR = psDroid->order.type == DORDER_RTR || psDroid->order.type == DORDER_RTR_SPECIFIED;
+	if (prevWasRTR && hasCommander(psDroid))
 	{
 		objTrace(psDroid->id, "Repair complete - move to commander");
 		orderDroidObj(psDroid, DORDER_GUARD, psDroid->psGroup->psCommander, ModeImmediate);
 	}
-	else if (psRepairFac && psRepairFac->psDeliveryPoint != nullptr)
+	else if (prevWasRTR && psRepairFac && psRepairFac->psDeliveryPoint != nullptr)
 	{
 		const FLAG_POSITION *dp = psRepairFac->psDeliveryPoint;
 		objTrace(psDroid->id, "Repair complete - move to delivery point");
 		// ModeQueue because delivery points are not yet synchronised!
 		orderDroidLoc(psDroid, DORDER_MOVE, dp->coords.x, dp->coords.y, ModeQueue);
 	}
-	else
+	else if (prevWasRTR)
 	{ // nothing to do, no commander, no repair point to go to. Stop, and guard this place.
 		psDroid->order.psObj = nullptr;
 		objTrace(psDroid->id, "Repair complete - guarding the place at x=%i y=%i", psDroid->pos.x, psDroid->pos.y);
@@ -2126,7 +2127,9 @@ struct rankMap
 unsigned int getDroidLevel(unsigned int experience, uint8_t player, uint8_t brainComponent)
 {
 	unsigned int numKills = experience / 65536;
+	ASSERT_OR_RETURN(0, brainComponent < numBrainStats, "Invalid brainComponent: %u", (unsigned)brainComponent);
 	const BRAIN_STATS *psStats = asBrainStats + brainComponent;
+	ASSERT_OR_RETURN(0, player < MAX_PLAYERS, "Invalid player: %u", (unsigned)player);
 	auto &vec = psStats->upgrade[player].rankThresholds;
 	ASSERT_OR_RETURN(0, vec.size() > 0, "rankThreshold was empty?");
 	for (int i = 1; i < vec.size(); ++i)
@@ -2143,7 +2146,8 @@ unsigned int getDroidLevel(unsigned int experience, uint8_t player, uint8_t brai
 
 unsigned int getDroidLevel(const DROID *psDroid)
 {
-	return getDroidLevel(psDroid->experience, psDroid->player, psDroid->asBits[COMP_BRAIN]);
+	// Sensors will use the first non-null brain component for ranks
+	return getDroidLevel(psDroid->experience, psDroid->player, (psDroid->droidType != DROID_SENSOR) ? psDroid->asBits[COMP_BRAIN] : 1);
 }
 
 UDWORD getDroidEffectiveLevel(const DROID *psDroid)
@@ -2989,8 +2993,8 @@ bool droidSensorDroidWeapon(const BASE_OBJECT *psObj, const DROID *psDroid)
 
 	//finally check the right droid/sensor combination
 	// check vtol droid with commander
-	if ((isVtolDroid(psDroid) || !proj_Direct(asWeaponStats + psDroid->asWeaps[0].nStat)) &&
-		psObj->type == OBJ_DROID && ((const DROID *)psObj)->droidType == DROID_COMMAND)
+	if (isVtolDroid(psDroid) && psObj->type == OBJ_DROID
+		&& ((const DROID *)psObj)->droidType == DROID_COMMAND)
 	{
 		return true;
 	}
@@ -3008,7 +3012,8 @@ bool droidSensorDroidWeapon(const BASE_OBJECT *psObj, const DROID *psDroid)
 	// Check indirect weapon droid with standard/CB/radar detector sensor
 	if (!proj_Direct(asWeaponStats + psDroid->asWeaps[0].nStat))
 	{
-		if (psStats->type == STANDARD_SENSOR ||	psStats->type == INDIRECT_CB_SENSOR || psStats->type == SUPER_SENSOR /*|| psStats->type == RADAR_DETECTOR_SENSOR*/)
+		if ((psStats->type == STANDARD_SENSOR || psStats->type == INDIRECT_CB_SENSOR || psStats->type == SUPER_SENSOR /*|| psStats->type == RADAR_DETECTOR_SENSOR*/)
+			&& !(psObj->type == OBJ_DROID && ((const DROID*)psObj)->droidType == DROID_COMMAND))
 		{
 			return true;
 		}

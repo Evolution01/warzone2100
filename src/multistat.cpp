@@ -169,6 +169,16 @@ void lookupRatingAsync(uint32_t playerIndex)
 	urlRequestData(req);
 }
 
+bool swapPlayerMultiStatsLocal(uint32_t playerIndexA, uint32_t playerIndexB)
+{
+	if (playerIndexA >= MAX_CONNECTED_PLAYERS || playerIndexB >= MAX_CONNECTED_PLAYERS)
+	{
+		return false;
+	}
+	std::swap(playerStats[playerIndexA], playerStats[playerIndexB]);
+	return true;
+}
+
 // ////////////////////////////////////////////////////////////////////////////
 // Set Player's stats
 // send stats to all players when bLocal is false
@@ -265,7 +275,11 @@ void recvMultiStats(NETQUEUE queue)
 		{
 			playerStats[playerIndex].identity.fromBytes(identity, EcKey::Public);
 		}
-		if (identity != prevIdentity)
+		else
+		{
+			debug(LOG_INFO, "Player sent empty identity: (player: %u, name: \"%s\", IP: %s)", playerIndex, NetPlay.players[playerIndex].name, NetPlay.players[playerIndex].IPtextAddress);
+		}
+		if ((identity != prevIdentity) || identity.empty())
 		{
 			ingame.PingTimes[playerIndex] = PING_LIMIT;
 			ingame.VerifiedIdentity[playerIndex] = false;
@@ -281,9 +295,16 @@ void recvMultiStats(NETQUEUE queue)
 			}
 
 			// Output to stdinterface, if enabled
-			std::string senderPublicKeyB64 = base64Encode(playerStats[playerIndex].identity.toBytes(EcKey::Public));
-			std::string senderIdentityHash = playerStats[playerIndex].identity.publicHashString();
-			wz_command_interface_output("WZEVENT: player identity UNVERIFIED: %" PRIu32 " %s %s\n", playerIndex, senderPublicKeyB64.c_str(), senderIdentityHash.c_str());
+			if (!identity.empty())
+			{
+				std::string senderPublicKeyB64 = base64Encode(playerStats[playerIndex].identity.toBytes(EcKey::Public));
+				std::string senderIdentityHash = playerStats[playerIndex].identity.publicHashString();
+				wz_command_interface_output("WZEVENT: player identity UNVERIFIED: %" PRIu32 " %s %s\n", playerIndex, senderPublicKeyB64.c_str(), senderIdentityHash.c_str());
+			}
+			else
+			{
+				wz_command_interface_output("WZEVENT: player identity EMPTY: %" PRIu32 "\n", playerIndex);
+			}
 
 			processAutoratingData = true;
 		}
@@ -352,6 +373,9 @@ static bool loadMultiStatsFile(const std::string& fileName, PLAYERSTATS *st, boo
 
 bool loadMultiStats(char *sPlayerName, PLAYERSTATS *st)
 {
+	// preserve current player identity (if loaded)
+	EcKey currentIdentity = (st) ? st->identity : EcKey();
+
 	*st = PLAYERSTATS();  // clear in case we don't get to load
 
 	// Prevent an empty player name (where the first byte is a 0x0 terminating char already)
@@ -387,8 +411,16 @@ bool loadMultiStats(char *sPlayerName, PLAYERSTATS *st)
 
 	if (st->identity.empty())
 	{
-		st->identity = EcKey::generate();  // Generate new identity.
-		saveMultiStats(sPlayerName, sPlayerName, st);  // Save new identity.
+		if (!currentIdentity.empty())
+		{
+			st->identity = currentIdentity;  	// Preserve existing identity when creating a new profile
+		}
+		else
+		{
+			st->identity = EcKey::generate();	// Generate new identity
+		}
+
+		saveMultiStats(sPlayerName, sPlayerName, st);  // Save new profile
 	}
 
 	// reset recent scores

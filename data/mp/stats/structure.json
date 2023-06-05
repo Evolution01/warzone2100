@@ -611,7 +611,7 @@
 		"hitpoints": 1000,
 		"id": "A0RepairCentre3",
 		"name": "Repair Facility",
-		"repairPoints": 40,
+		"repairPoints": 50,
 		"resistance": 150,
 		"sensorID": "DefaultSensor1Mk1",
 		"strength": "MEDIUM",
@@ -652,7 +652,7 @@
 		"userLimits": [
 			0,
 			5,
-			5
+			20
 		],
 		"width": 2
 	},
@@ -797,7 +797,7 @@
 		"armour": 12,
 		"breadth": 1,
 		"buildPoints": 300,
-		"buildPower": 225,
+		"buildPower": 175,
 		"height": 1,
 		"hitpoints": 600,
 		"id": "AASite-QuadBof",
@@ -841,7 +841,7 @@
 		"armour": 12,
 		"breadth": 1,
 		"buildPoints": 250,
-		"buildPower": 125,
+		"buildPower": 175,
 		"height": 1,
 		"hitpoints": 400,
 		"id": "AASite-QuadMg1",
@@ -863,7 +863,7 @@
 		"armour": 12,
 		"breadth": 1,
 		"buildPoints": 275,
-		"buildPower": 175,
+		"buildPower": 225,
 		"height": 1,
 		"hitpoints": 400,
 		"id": "AASite-QuadRotMg",
@@ -1366,6 +1366,28 @@
 		],
 		"width": 1
 	},
+	"Emplacement-MRLHvy-pit": {
+		"armour": 10,
+		"breadth": 1,
+		"buildPoints": 450,
+		"buildPower": 150,
+		"height": 1,
+		"hitpoints": 400,
+		"id": "Emplacement-MRLHvy-pit",
+		"name": "Heavy Rocket Battery",
+		"resistance": 150,
+		"sensorID": "DefaultSensor1Mk1",
+		"strength": "HARD",
+		"structureModel": [
+			"BLHARDPT.PIE"
+		],
+		"thermal": 10,
+		"type": "DEFENSE",
+		"weapons": [
+			"Rocket-MRL-Hvy"
+		],
+		"width": 1
+	},
 	"Emplacement-MdART-pit": {
 		"armour": 10,
 		"breadth": 1,
@@ -1414,7 +1436,7 @@
 		"armour": 10,
 		"breadth": 1,
 		"buildPoints": 425,
-		"buildPower": 150,
+		"buildPower": 225,
 		"height": 1,
 		"hitpoints": 300,
 		"id": "Emplacement-MortarPit-Incendiary",
@@ -1458,7 +1480,7 @@
 		"armour": 10,
 		"breadth": 1,
 		"buildPoints": 400,
-		"buildPower": 100,
+		"buildPower": 125,
 		"height": 1,
 		"hitpoints": 300,
 		"id": "Emplacement-MortarPit01",
@@ -1480,7 +1502,7 @@
 		"armour": 10,
 		"breadth": 1,
 		"buildPoints": 450,
-		"buildPower": 150,
+		"buildPower": 200,
 		"height": 1,
 		"hitpoints": 300,
 		"id": "Emplacement-MortarPit02",
@@ -1634,7 +1656,7 @@
 		"armour": 10,
 		"breadth": 1,
 		"buildPoints": 500,
-		"buildPower": 325,
+		"buildPower": 425,
 		"height": 1,
 		"hitpoints": 400,
 		"id": "Emplacement-Rocket06-IDF",
@@ -1678,7 +1700,7 @@
 		"armour": 10,
 		"breadth": 1,
 		"buildPoints": 425,
-		"buildPower": 150,
+		"buildPower": 175,
 		"height": 1,
 		"hitpoints": 300,
 		"id": "Emplacement-RotMor",
@@ -2242,13 +2264,13 @@
 		"armour": 10,
 		"breadth": 1,
 		"buildPoints": 400,
-		"buildPower": 300,
+		"buildPower": 275,
 		"height": 2,
 		"hitpoints": 600,
 		"id": "P0-AASite-Laser",
 		"name": "Stormbringer Emplacement",
 		"resistance": 150,
-		"sensorID": "NavGunSensor",
+		"sensorID": "DefaultSensor1Mk1",
 		"strength": "HARD",
 		"structureModel": [
 			"Blaamnt2.PIE"
@@ -2264,13 +2286,13 @@
 		"armour": 10,
 		"breadth": 1,
 		"buildPoints": 350,
-		"buildPower": 250,
+		"buildPower": 275,
 		"height": 2,
 		"hitpoints": 400,
 		"id": "P0-AASite-SAM1",
 		"name": "Avenger SAM Site",
 		"resistance": 150,
-		"sensorID": "NavGunSensor",
+		"sensorID": "DefaultSensor1Mk1",
 		"strength": "HARD",
 		"structureModel": [
 			"Blaamnt1.PIE"
@@ -2286,13 +2308,13 @@
 		"armour": 10,
 		"breadth": 1,
 		"buildPoints": 450,
-		"buildPower": 350,
+		"buildPower": 325,
 		"height": 2,
 		"hitpoints": 600,
 		"id": "P0-AASite-SAM2",
 		"name": "Vindicator SAM Site",
 		"resistance": 150,
-		"sensorID": "NavGunSensor",
+		"sensorID": "DefaultSensor1Mk1",
 		"strength": "HARD",
 		"structureModel": [
 			"Blaamnt2.PIE"
@@ -2308,13 +2330,13 @@
 		"armour": 10,
 		"breadth": 1,
 		"buildPoints": 300,
-		"buildPower": 200,
+		"buildPower": 225,
 		"height": 2,
 		"hitpoints": 400,
 		"id": "P0-AASite-Sunburst",
 		"name": "Sunburst AA Site",
 		"resistance": 150,
-		"sensorID": "NavGunSensor",
+		"sensorID": "DefaultSensor1Mk1",
 		"strength": "MEDIUM",
 		"structureModel": [
 			"Blaamnt1.PIE"
@@ -3407,7 +3429,7 @@
 	"X-Super-Cannon": {
 		"armour": 15,
 		"breadth": 2,
-		"buildPoints": 1600,
+		"buildPoints": 2000,
 		"buildPower": 1000,
 		"combinesWithWall": true,
 		"height": 2,
@@ -3430,7 +3452,7 @@
 	"X-Super-MassDriver": {
 		"armour": 15,
 		"breadth": 2,
-		"buildPoints": 1600,
+		"buildPoints": 2000,
 		"buildPower": 1800,
 		"combinesWithWall": true,
 		"height": 3,
@@ -3453,7 +3475,7 @@
 	"X-Super-Missile": {
 		"armour": 15,
 		"breadth": 2,
-		"buildPoints": 1600,
+		"buildPoints": 2000,
 		"buildPower": 1600,
 		"combinesWithWall": true,
 		"height": 3,
@@ -3476,7 +3498,7 @@
 	"X-Super-Rocket": {
 		"armour": 15,
 		"breadth": 2,
-		"buildPoints": 1600,
+		"buildPoints": 2000,
 		"buildPower": 1250,
 		"combinesWithWall": true,
 		"height": 3,

@@ -97,7 +97,6 @@ MULTIPLAYERGAME				game;									//info to describe game.
 MULTIPLAYERINGAME			ingame;
 
 char						beaconReceiveMsg[MAX_PLAYERS][MAX_CONSOLE_STRING_LENGTH];	//beacon msg for each player
-char						playerName[MAX_CONNECTED_PLAYERS][MAX_STR_LENGTH];	//Array to store all player names (humans and AIs)
 
 #define DATACHECK2_INTERVAL_MS 10000
 
@@ -176,7 +175,7 @@ static void autoLagKickRoutine()
 			debug(LOG_INFO, "%s", msg.c_str());
 			sendTextMessage(msg.c_str());
 			wz_command_interface_output("WZEVENT: lag-kick: %u %s\n", i, NetPlay.players[i].IPtextAddress);
-			kickPlayer(i, "Your connection was too laggy.", ERROR_CONNECTION);
+			kickPlayer(i, "Your connection was too laggy.", ERROR_CONNECTION, false);
 			ingame.LagCounter[i] = 0;
 		}
 		else if (ingame.LagCounter[i] >= (LagAutoKickSeconds - 3)) {
@@ -371,7 +370,7 @@ bool multiPlayerLoop()
 						NETlogEntry(msg, SYNC_FLAG, index);
 
 #ifndef DEBUG
-						kickPlayer(index, _("Invalid data!"), ERROR_INVALID);
+						kickPlayer(index, _("Invalid data!"), ERROR_INVALID, false);
 #endif
 						debug(LOG_WARNING, "Kicking Player %s (%u), they tried to bypass data integrity check!", getPlayerName(index), index);
 					}
@@ -568,17 +567,11 @@ BASE_OBJECT *IdToPointer(UDWORD id, UDWORD player)
 
 // ////////////////////////////////////////////////////////////////////////////
 // return a players name.
-const char *getPlayerName(int player, bool storedName /*= false*/)
+const char *getPlayerName(int player)
 {
 	ASSERT_OR_RETURN(nullptr, player >= 0, "Wrong player index: %d", player);
 
 	const bool aiPlayer = (static_cast<size_t>(player) < NetPlay.players.size()) && (NetPlay.players[player].ai >= 0) && !NetPlay.players[player].allocated;
-
-	// playerName is created through setPlayerName()
-	if (storedName && !aiPlayer && player < MAX_CONNECTED_PLAYERS && strcmp(playerName[player], "") != 0)
-	{
-		return (char *)&playerName[player];
-	}
 
 	if (aiPlayer && GetGameMode() == GS_NORMAL && !challengeActive)
 	{
@@ -603,7 +596,6 @@ const char *getPlayerName(int player, bool storedName /*= false*/)
 bool setPlayerName(int player, const char *sName)
 {
 	ASSERT_OR_RETURN(false, player < MAX_CONNECTED_PLAYERS && player >= 0, "Player index (%u) out of range", player);
-	sstrcpy(playerName[player], sName); // Intended for long time storage of player name for Intel menu viewing.
 	sstrcpy(NetPlay.players[player].name, sName);
 	return true;
 }
@@ -622,19 +614,8 @@ bool isHumanPlayer(int player)
 // Clear player name data after game quit.
 void clearPlayerName(unsigned int player)
 {
-	if (player == CLEAR_ALL_NAMES)
-	{
-		for (unsigned int i = 0; i < MAX_CONNECTED_PLAYERS; ++i)
-		{
-			playerName[i][0] = '\0';
-			NetPlay.players[i].name[0] = '\0';
-		}
-	}
-	else
-	{
-		playerName[player][0] = '\0';
-		NetPlay.players[player].name[0] = '\0';
-	}
+	ASSERT_OR_RETURN(, player < MAX_CONNECTED_PLAYERS, "Player index (%u) out of range", player);
+	NetPlay.players[player].name[0] = '\0';
 }
 
 // returns player responsible for 'player'
@@ -822,7 +803,7 @@ static bool sendDataCheck2()
 				sendInGameSystemMessage(msg.c_str());
 				addConsoleMessage(msg.c_str(), LEFT_JUSTIFY, NOTIFY_MESSAGE);
 
-				kickPlayer(player, _("Your data doesn't match the host's!"), ERROR_WRONGDATA);
+				kickPlayer(player, _("Your data doesn't match the host's!"), ERROR_WRONGDATA, false);
 				debug(LOG_INFO, "%s (%u) did not respond with a NET_DATA_CHECK2 within the required timeframe (%s seconds), and has been kicked", getPlayerName(player), player, std::to_string(maxWaitSeconds.count()).c_str());
 				ingame.lastSentPlayerDataCheck2[player].reset();
 				continue;
@@ -1006,7 +987,7 @@ static bool recvDataCheck2(NETQUEUE queue)
 		sendInGameSystemMessage(msg.c_str());
 		addConsoleMessage(msg.c_str(), LEFT_JUSTIFY, NOTIFY_MESSAGE);
 
-		kickPlayer(player, _("Your data doesn't match the host's!"), ERROR_WRONGDATA);
+		kickPlayer(player, _("Your data doesn't match the host's!"), ERROR_WRONGDATA, false);
 		return false;
 	}
 
@@ -1157,7 +1138,7 @@ bool shouldProcessMessage(NETQUEUE& queue, uint8_t type)
 				debug(LOG_INFO, "Auto kicking player %s, invalid command received: %s", NetPlay.players[senderPlayerIdx].name, messageTypeToString(type));
 				ssprintf(buf, _("Auto kicking player %s, invalid command received: %u"), NetPlay.players[senderPlayerIdx].name, type);
 				sendInGameSystemMessage(buf);
-				kickPlayer(queue.index, _("Unauthorized network command"), ERROR_INVALID);
+				kickPlayer(queue.index, _("Unauthorized network command"), ERROR_INVALID, false);
 			}
 			return false;
 		}
@@ -1414,7 +1395,7 @@ void HandleBadParam(const char *msg, const int from, const int actual)
 	{
 		ssprintf(buf, _("Auto kicking player %s, invalid command received."), NetPlay.players[actual].name);
 		sendInGameSystemMessage(buf);
-		kickPlayer(actual, buf, KICK_TYPE);
+		kickPlayer(actual, buf, KICK_TYPE, false);
 	}
 }
 
@@ -1885,6 +1866,12 @@ bool recvSpecInGameTextMessage(NETQUEUE queue)
 	}
 
 	auto message = NetworkTextMessage(SPECTATOR_MESSAGE, newmsg);
+
+	if (isPlayerMuted(sender))
+	{
+		return false;
+	}
+
 	printInGameTextMessage(message);
 
 	// make some noise!
